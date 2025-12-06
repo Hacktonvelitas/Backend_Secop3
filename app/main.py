@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
-from db.deps import get_db
+from app.db.init_db import get_db
 from db import repo
 from db.schema import Licitacion, Flags, FlagsLicitaciones, FlagsLog, LicitacionChunk, LicitacionKeymap
 from operaciones.pipeline import get_available_flows, run_flow_for_one, run_flow_batch
