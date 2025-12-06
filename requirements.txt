@@ -27,3 +27,8 @@ gunicorn
 
 pandas
 openpyxl
+
+passlib[bcrypt]
+PyJWT
+python-multipart
+

@@ -8,3 +8,5 @@ backups/
 *.gz
 *.7z
 *.zip
+.venv/
+__pycache__/
