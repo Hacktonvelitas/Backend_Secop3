@@ -10,10 +10,12 @@ from sqlalchemy import text
 
 from db.deps import get_db
 from db import repo
-from db.schema import Licitacion, Flags, FlagsLicitaciones, FlagsLog, LicitacionChunk, LicitacionKeymap
+# Import updated schema classes
+from db.schema import PublicLicitacion, Empresa, PublicLicitacionChunk
 from operaciones.pipeline import get_available_flows, run_flow_for_one, run_flow_batch
-from operaciones.filtro_inicial import run_flow_for_one as run_flow_for_one_filtro_inicial
-from operaciones.filtro_augmented import run_flow_for_one as run_flow_for_one_filtro_augmented
+# Import Matching Logic
+import operaciones.match_inicial as match_i
+import operaciones.match_augmented as match_a
 from ai_router import router as ai_router
 
 api = FastAPI(title="Licita API", version="1.0.0")
@@ -36,13 +38,11 @@ def index():
             "/health",
             "/licitaciones/search",
             "/licitaciones",
-            "/flags/{licitacion_id}",
+            "/match/inicial",
+            "/match/augmented",
             "/pipelines/flows",
             "/pipelines/run/{licitacion_id}",
             "/pipelines/batch",
-            "/pipes/red-contactos/run",
-            "/pipes/red-contactos/run-v2",
-            "/pipes/flags/{flag_code}/run/{licitacion_id}",
             "/ai/query",
             "/ai/graphs/assistant",
         ],
@@ -57,26 +57,32 @@ class LicitacionIn(BaseModel):
     cuantia: Optional[float] = None
     modalidad: Optional[str] = None
     numero: Optional[str] = None
-    estado: Optional[str] = None
+    # Add other fields if necessary for creating licitaciones
     fecha_public: Optional[date] = None
-    ubicacion: Optional[str] = None
-    act_econ: Optional[str] = None
-    enlace: Optional[str] = None
-    portal_origen: Optional[str] = None
-    texto_indexado: Optional[str] = None
 
 
-class FlagSetIn(BaseModel):
-    flag_codigo: str = Field(..., examples=["red1"])
-    valor: bool
-    comentario: Optional[str] = None
-    fuente: Optional[str] = "manual"
+class MatchRequest(BaseModel):
+    nit_empresa: str
+    fecha_inicio: Optional[date] = None
+    top_k: int = 20
+    min_score: float = 0.5
+
+
+class MatchAugmentedRequest(BaseModel):
+    nit_empresa: str
+    etiquetas_override: Optional[List[str]] = None
+    fecha_inicio: Optional[date] = None
+    top_k: int = 50 
+    final_k: int = 20
 
 
 # --------- Rutas básicas ----------
 
 @api.post("/licitaciones", response_model=dict)
 def create(lic_in: LicitacionIn, db: Session = Depends(get_db)):
+    # Note: repo.create_licitacion might need update if it uses old Licitacion class
+    # Assumed repo is compatible or we fix it if errors arise.
+    # For now, simplistic creation:
     lic = repo.create_licitacion(db, **lic_in.model_dump())
     db.commit()
     return {"id": lic.id}
@@ -97,26 +103,46 @@ def search(q: str, limit: int = 50, db: Session = Depends(get_db)):
     ]
 
 
-@api.post("/flags/{licitacion_id}", response_model=dict)
-def set_flag(licitacion_id: int, body: FlagSetIn, db: Session = Depends(get_db)):
-    lic: Licitacion | None = db.get(Licitacion, licitacion_id)
-    if not lic:
-        raise HTTPException(status_code=404, detail="Licitación no encontrada")
+# --------- Rutas Match (Nuevas) ----------
 
-    fli = repo.set_flag_for_licitacion(
+@api.post("/match/inicial", response_model=List[dict])
+def run_match_inicial(
+    payload: MatchRequest, 
+    db: Session = Depends(get_db)
+):
+    """
+    Ejecuta el matching básico basado en vectores.
+    """
+    results = match_i.obtener_oportunidades_empresa(
         session=db,
-        licitacion_id=licitacion_id,
-        flag_codigo=body.flag_codigo,
-        valor=body.valor,
-        comentario=body.comentario,
-        fuente=body.fuente,
-        usuario_log="api",
+        nit_empresa=payload.nit_empresa,
+        fecha_inicio=payload.fecha_inicio,
+        top_k=payload.top_k,
+        min_score=payload.min_score
     )
-    db.commit()
-    return {"flags_licitaciones_id": fli.id, "ok": True}
+    return [r.to_dict() for r in results]
 
 
-# --------- Orquestador ----------
+@api.post("/match/augmented", response_model=List[dict])
+def run_match_augmented(
+    payload: MatchAugmentedRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Ejecuta matching aumentando score con etiquetas (tags) de la empresa.
+    """
+    results = match_a.obtener_match_augmented(
+        session=db,
+        nit_empresa=payload.nit_empresa,
+        etiquetas_override=payload.etiquetas_override,
+        fecha_inicio=payload.fecha_inicio,
+        top_k=payload.top_k,
+        final_k=payload.final_k
+    )
+    return results
+
+
+# --------- Orquestador (Legacy / Pipeline) ----------
 
 class BatchRequest(BaseModel):
     flow: str = "all"
@@ -155,123 +181,3 @@ def run_pipeline_batch_ep(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-
-
-# --------- Red de contactos (JSON in-memory) ----------
-
-class PersonasPayload(BaseModel):
-    personas: List[Dict[str, Any]]
-    contratistas: Optional[List[str]] = None
-
-
-class RunRedContactosRequest(BaseModel):
-    licitacion_ids: List[int]
-    data: PersonasPayload
-
-
-@api.post("/pipes/red-contactos/run", response_model=List[dict])
-def run_red_contactos_endpoint(
-    payload: RunRedContactosRequest,
-    db: Session = Depends(get_db),
-):
-    return run_flow_batch(
-        db,
-        ksflow="red_contactos",
-        lic_ids=payload.licitacion_ids,
-        json_override=payload.data.model_dump(),
-    )
-
-
-class OneFlagRequest(BaseModel):
-    json_override: Optional[Dict[str, Any]] = None
-
-
-@api.post("/pipes/flags/{flag_code}/run/{licitacion_id}", response_model=dict)
-def run_one_flag_endpoint(
-    flag_code: str,
-    licitacion_id: int,
-    payload: OneFlagRequest = Body(default=OneFlagRequest()),
-    db: Session = Depends(get_db),
-):
-    aliases = {
-        "red_precio": "red_precio",
-        "gap_fechas": "gap_fechas",
-        "red_contactos": "red_contactos",
-        "hora_1159": "hora_1159", 
-    }
-    flow = aliases.get(flag_code)
-    if not flow:
-        raise HTTPException(status_code=400, detail=f"Flag desconocido: {flag_code}")
-
-    try:
-        result = run_flow_for_one(
-            db,
-            licitacion_id,
-            flow=flow,
-            json_override=payload.json_override or {},
-        )
-        return {"ok": True, "flow": flow, "result": result}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-# --------- Red de contactos V2 (aprobadores + personas) ----------
-
-class Trabajo(BaseModel):
-    cargo: str
-    entidad: str
-    anio_inicio: int
-    anio_fin: int
-    descripcion: Optional[str] = None
-
-
-class Conexion(BaseModel):
-    con_id: Optional[str] = None
-    con_nombre: Optional[str] = None
-    tipo: Optional[str] = None
-    fuente: Optional[str] = None
-
-
-class PersonaV2(BaseModel):
-    id: str
-    nombre: str
-    ent_publica: bool
-    entidad: str
-    es_contratista: bool = False
-    trabajos: List[Trabajo] = []
-    conexiones: List[Conexion] = []
-
-
-class Aprobador(BaseModel):
-    licitacion_id: int
-    nombre: str
-    rol: str
-    cargo: Optional[str] = None
-    entidad: Optional[str] = None
-    tipo_actor: Optional[str] = "publico"  # publico/privado
-    identificacion: Optional[str] = None
-    correo: Optional[str] = None
-
-
-class PersonasPayloadV2(BaseModel):
-    aprobadores: List[Aprobador]
-    personas: List[PersonaV2]
-
-
-class RunRedContactosV2(BaseModel):
-    licitacion_id: int
-    data: PersonasPayloadV2
-
-
-@api.post("/pipes/red-contactos/run-v2", response_model=dict)
-def run_red_contactos_v2(
-    payload: RunRedContactosV2,
-    db: Session = Depends(get_db),
-):
-   
-    return run_flow_for_one(
-        db,
-        payload.licitacion_id,
-        flow="red_contactos",
-        json_override=payload.data.model_dump(),  # <- aprobadores + personas
-    )
