@@ -1,14 +1,14 @@
-# app/operaciones/match_empresa.py
+# app/operaciones/match_inicial.py
 from __future__ import annotations
 
 import logging
 import sys
 import numpy as np
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 from datetime import date
 from dataclasses import dataclass, asdict
 
-from sqlalchemy import text
+from sqlalchemy import text, select
 from sqlalchemy.orm import Session
 from sklearn.cluster import KMeans
 
@@ -39,7 +39,9 @@ def _to_np_vec(v) -> Optional[np.ndarray]:
     if isinstance(v, (bytes, bytearray)):
         try:
             arr = np.frombuffer(v, dtype=np.float32)
-            return np.nan_to_num(arr) if arr.size > 0 else None
+            if arr.size > 0:
+                arr = np.nan_to_num(arr)
+            return arr if arr.size > 0 else None
         except: pass
 
     # Caso: String "[0.1, 0.2, ...]"
@@ -71,12 +73,17 @@ class MatchResult:
     best_chunk_text: str  
     entidad: str
     objeto: str
-    cuantia: float        # Agregué cuantía porque es útil verla
-    fecha_public: str     # Agregué fecha para contexto
-    cluster_id: int = -1  
+    cuantia: float        
+    fecha_public: str     
+    cluster_id: int = -1
+    vector_licitacion: Optional[np.ndarray] = None # Added for Augmented Match
 
     def to_dict(self):
-        return asdict(self)
+        # Excluir vector de la salida dict para no ensuciar JSONs
+        d = asdict(self)
+        if 'vector_licitacion' in d:
+             del d['vector_licitacion']
+        return d
 
 # ============================================================
 # Consultas SQL
@@ -84,17 +91,18 @@ class MatchResult:
 
 def _fetch_empresa_vector(session: Session, nit: str) -> Optional[np.ndarray]:
     """Busca el vector de la empresa por NIT."""
-    # Nota: Asegúrate que el NIT venga sin guiones si así está en la DB, o manéjalo aquí.
+    # Nota: Asegúrate que el NIT venga saneado
     clean_nit = nit.replace("-", "").replace(" ", "")
     
+    # En nuevo schema: public.empresa.razon_social_vec
     row = session.execute(text("""
         SELECT razon_social_vec
-        FROM public.empresa_chunked
+        FROM public.empresa
         WHERE nit = :nit
     """), {"nit": clean_nit}).fetchone()
 
-    if not row or not row[0]:
-        LOGGER.warning(f"Empresa NIT {clean_nit} no encontrada o sin vector.")
+    if not row or row[0] is None:
+        LOGGER.warning(f"Empresa NIT {clean_nit} no encontrada o sin vector (razon_social_vec).")
         return None
     
     vec = _to_np_vec(row[0])
@@ -107,6 +115,7 @@ def _fetch_licitacion_chunks_filtered(
 ) -> List[Tuple]:
     """
     Trae chunks con filtro opcional de fecha.
+    Schema nuevo: public_licitacion_chunk joined with public_licitacion
     """
     msg_fecha = f"desde {fecha_inicio}" if fecha_inicio else "todo el histórico"
     LOGGER.info(f"Cargando chunks ({msg_fecha}). Límite: {limit}...")
@@ -158,23 +167,16 @@ def obtener_oportunidades_empresa(
     n_clusters: int = 3
 ) -> List[MatchResult]:
     """
-    Función orquestadora para ser llamada desde la API.
-    1. Busca vector empresa.
-    2. Busca chunks de licitaciones (filtrados por fecha si aplica).
-    3. Calcula match.
-    4. Agrupa con K-Means.
+    Función orquestadora para ser llamada desde la API o Match Augmented.
     """
     
     # 1. Vector Empresa
     empresa_vec = _fetch_empresa_vector(session, nit_empresa)
     if empresa_vec is None:
-        # Retornamos lista vacía si la empresa no existe (o podrías lanzar Exception)
         return []
 
     # 2. Universo de Licitaciones
-    # IMPORTANTE: Si es "todo el histórico", el límite debe ser alto.
-    # Si tienes 1 millón de licitaciones, esto en Python explotará por RAM. 
-    # Para hackathon (1k-10k licitaciones) está bien.
+    # Ajustar límite según capacidad de instancia
     candidates = _fetch_licitacion_chunks_filtered(session, fecha_inicio, limit=20000)
     
     if not candidates:
@@ -185,11 +187,9 @@ def obtener_oportunidades_empresa(
     matches_temp = {} 
     
     for lid, txt, lic_vec, ent, obj, cuant, fecha in candidates:
-        # Producto punto
         score = float(np.dot(empresa_vec, lic_vec))
         
         if score >= min_score:
-            # Guardamos el mejor chunk de esta licitación
             if lid not in matches_temp or score > matches_temp[lid]['score']:
                 matches_temp[lid] = {
                     'score': score,
@@ -211,22 +211,26 @@ def obtener_oportunidades_empresa(
             entidad=data['ent'],
             objeto=data['obj'],
             cuantia=data['cuant'],
-            fecha_public=data['fecha']
+            fecha_public=data['fecha'],
+            vector_licitacion=data['vec'] # Guardamos vector para augmented
         ))
         
-    # Ordenar y cortar
+    # Ordenar por score inicial
     results_list.sort(key=lambda x: x.score, reverse=True)
+    
+    # NOTA: En match_inicial cortamos a top_k, pero si va a llamar a augmented,
+    # tal vez queramos pasar más candidatos. Por ahora respetamos top_k.
+    # Si augmented necesita más, quien llame a esta función debe aumentar top_k.
     top_results = results_list[:top_k]
     
-    LOGGER.info(f"Matches encontrados: {len(top_results)} (Score >= {min_score})")
+    LOGGER.info(f"Matches encontrados (inicial): {len(top_results)} (Score >= {min_score})")
 
     # 4. Clustering (K-Means)
     if top_results and len(top_results) >= n_clusters:
         try:
             vecs_for_clustering = []
             for res in top_results:
-                # Recuperamos el vector original del dict temporal
-                vecs_for_clustering.append(matches_temp[res.licitacion_id]['vec'])
+                vecs_for_clustering.append(res.vector_licitacion)
             
             X = np.vstack(vecs_for_clustering)
             kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
@@ -236,6 +240,5 @@ def obtener_oportunidades_empresa(
                 res.cluster_id = int(labels[i])
         except Exception as e:
             LOGGER.error(f"Error en K-Means: {e}")
-            # Si falla el clustering, no rompemos el request, solo quedan con cluster -1
 
     return top_results

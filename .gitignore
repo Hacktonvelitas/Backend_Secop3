@@ -10,3 +10,4 @@ backups/
 *.zip
 .venv/
 __pycache__/
+.env

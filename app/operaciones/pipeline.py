@@ -4,67 +4,69 @@ from typing import List, Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from .flag_redcontactos import run_red_contactos
+# Importamos los nuevos modulos de matching
+import operaciones.match_inicial as match_i
+import operaciones.match_augmented as match_a
 
+# Mantenemos imports legacy si están disponibles, sino ignora
 try:
-    from .flag_precio import run_flag_precio_for_one as _run_precio_one
+    from .precios_IQ import run_flag_precio_for_one as _run_precio_one
     HAS_PRECIO = True
 except Exception:
     HAS_PRECIO = False
 
-try:
-    from .flag_fecha import run_flag_fecha_for_one as _run_gap_fecha_one
-    HAS_GAP_FECHA = True
-except Exception:
-    HAS_GAP_FECHA = False
-
-try:
-    from .flag_horas import run_flag_hora_1159_for_one as _run_hora_1159_one
-    HAS_HORA_1159 = True
-except Exception:
-    HAS_HORA_1159 = False
-
 
 def get_computable_flows() -> List[str]:
     """
-    Flujos que NO requieren payload externo (se pueden correr en batch).
+    Flujos disponibles. Flags legacy pueden seguir o quitarse.
+    Agregamos 'match_augmented' como un flujo ejecutable si se desea.
     """
     base: List[str] = []
     if HAS_PRECIO:
         base.append("red_precio")
-    if HAS_GAP_FECHA:
-        base.append("gap_fechas")
-    if HAS_HORA_1159:
-        base.append("hora_1159")
-
+    
+    # Podemos agregar 'match_checker' si quisieras correr validaciones, 
+    # pero match es generalmente "Company -> Licitaciones", no "Licitacion -> Check".
+    # El pipeline original estaba diseñado para "Valida esta Licitacion".
+    # Por ahora lo dejamos simple.
     return base
 
 def get_interactive_flows() -> List[str]:
-    """
-    Flujos que requieren JSON/payload del frontend (no se incluyen en 'all').
-    """
-    return ["red_contactos"]
+    return ["red_contactos", "match_augmented"]
 
 def get_available_flows() -> List[str]:
-    """
-    Para el frontend/UI: lista total visible.
-    Nota: 'all' == solo computables.
-    """
     return get_computable_flows() + get_interactive_flows() + ["all"]
 
 
 def _run_one_flow(db: Session, lic_id: int, flow: str, json_override: Optional[dict]) -> dict:
-    # Interactivo: requiere JSON
-    if flow == "red_contactos":
-        if not json_override:
-            # En vez de ejecutar y dejar comentario "JSON inválido", falla explícito:
-            return {"flow": "red_contactos", "ok": False, "error": "json_required"}
+    
+    # Match Augmented via pipeline
+    if flow == "match_augmented":
+        # Este flujo es "raro" para una licitación individual, 
+        # porque match_augmented es "Empresa -> Lista de Lics".
+        # Si se corre para UNA licitación, ¿qué significa?
+        # ¿"Esta licitación hace match con la empresa X"?
+        # Asumiremos que el payload trae 'nit_empresa' y validamos si esta lic_id sale en el top.
+        
+        nit = json_override.get('nit_empresa') if json_override else None
+        if not nit:
+            return {"flow": "match_augmented", "ok": False, "error": "nit_empresa required in json_override"}
+        
+        # Corremos match augmented
+        results = match_a.obtener_match_augmented(db, nit_empresa=nit)
+        
+        # Verificamos si lic_id esta en results
+        match_data = next((r for r in results if r['licitacion_id'] == lic_id), None)
+        
         return {
-            "flow": "red_contactos",
-            "result": run_red_contactos(db, lic_id, json_override=json_override or {}),
+            "flow": "match_augmented",
+            "result": {
+                "matched": bool(match_data),
+                "data": match_data
+            }
         }
 
-    # Computables:
+    # Computables Legacy:
     if flow == "red_precio" and HAS_PRECIO:
         res = _run_precio_one(db, lic_id)
         return {
@@ -81,26 +83,12 @@ def _run_one_flow(db: Session, lic_id: int, flow: str, json_override: Optional[d
                     "n_comparables": res.n_comparables,
                     "median": res.stats.median,
                     "z_mad": res.stats.z_mad,
-                    "lower": res.stats.lower,
-                    "upper": res.stats.upper,
                     "neighbors": res.neighbor_ids,
                 },
             },
         }
 
-    if flow == "gap_fechas" and HAS_GAP_FECHA:
-        return {
-            "flow": "gap_fechas",
-            "result": _run_gap_fecha_one(db, lic_id, json_override=json_override or {}),
-        }
-        
-    if flow == "hora_1159" and HAS_HORA_1159:
-        return {
-            "flow": "hora_1159",
-            "result": _run_hora_1159_one(db, lic_id, json_override=json_override or {}),
-        }
-    raise ValueError(f"Flow desconocido o no disponible: {flow}")
-
+    return {"flow": flow, "status": "skipped_or_unknown"}
 
 
 def run_flow_for_one(
@@ -115,12 +103,10 @@ def run_flow_for_one(
         flows = [flow]
 
     applied = [_run_one_flow(db, licitacion_id, f, json_override) for f in flows]
-
     
     db.commit()
 
     return {"licitacion_id": licitacion_id, "applied": applied}
-
 
 
 def run_flow_batch(
@@ -131,25 +117,11 @@ def run_flow_batch(
     limit: Optional[int] = None,
     json_override: Optional[dict] = None,
 ) -> List[dict]:
-    # Validaciones según tipo de flujo
-    if ksflow == "all":
-        # OK (solo computables)
-        pass
-    elif ksflow in get_computable_flows():
-        # OK
-        pass
-    elif ksflow == "red_contactos":
-        # Requiere JSON explícito y lic_ids (para endpoint dedicado)
-        if not json_override:
-            raise ValueError("red_contactos requiere json_override (payload PersonasPayload).")
-        if not lic_ids:
-            raise ValueError("red_contactos requiere lic_ids (lista de IDs a evaluar).")
-    else:
-        raise ValueError(f"Flow desconocido: {ksflow}")
-
+    
     # Cursor de IDs si no vienen dados (solo para computables)
     if lic_ids is None:
-        sql = "SELECT id FROM public.licitacion"
+        # Ajuste para nuevo schema: tabla public_licitacion
+        sql = "SELECT id FROM public.public_licitacion"
         if where_clause:
             sql += f" WHERE {where_clause}"
         sql += " ORDER BY id"
