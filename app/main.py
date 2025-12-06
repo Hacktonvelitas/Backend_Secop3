@@ -12,7 +12,8 @@ from db.deps import get_db
 from db import repo
 from db.schema import Licitacion, Flags, FlagsLicitaciones, FlagsLog, LicitacionChunk, LicitacionKeymap
 from operaciones.pipeline import get_available_flows, run_flow_for_one, run_flow_batch
-
+from operaciones.filtro_inicial import run_flow_for_one as run_flow_for_one_filtro_inicial
+from operaciones.filtro_augmented import run_flow_for_one as run_flow_for_one_filtro_augmented
 from ai_router import router as ai_router
 
 api = FastAPI(title="Licita API", version="1.0.0")
