@@ -1,9 +1,3 @@
-/*
-============================================================================
-PROYECTO: SISTEMA INTEGRAL DE LICITACIONES (MERGED ARCHITECTURE - FINAL)
-DESCRIPCIÓN: Esquema completo unificado (Ingesta, Core, Financiero, RRHH, IT).
-============================================================================
-*/
 
 -- 1. EXTENSIONES
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -158,68 +152,41 @@ CREATE TABLE IF NOT EXISTS empresa (
     -- IA Profile
     razon_social_vec     vector(1536)
 );
+-- (He quitado la coma que sobraba después de es_zomac o razon_social_vec dependiendo de tu versión anterior)
 
--- 4.1 HISTÓRICO FINANCIERO
-CREATE TABLE IF NOT EXISTS empresa_financieros (
+-- 4.3.1 GESTIÓN DOCUMENTAL DE EMPRESA (S3 + RAG)
+-- Esta tabla guarda la referencia al archivo físico en S3
+CREATE TABLE IF NOT EXISTS empresa_documentos (
     id                  BIGSERIAL PRIMARY KEY,
     empresa_nit         VARCHAR(20) REFERENCES empresa(nit) ON DELETE CASCADE,
-    ano_fiscal          INT NOT NULL,
+    nombre_archivo      VARCHAR(255), -- Ej: "Camara_Comercio_2025.pdf"
+    tipo_documento      VARCHAR(50),  -- 'RUT', 'CAMARA_COMERCIO', 'PORTAFOLIO_SERVICIOS', 'ESTADOS_FINANCIEROS'
     
-    -- Balance
-    activo_corriente    NUMERIC(18, 2),
-    activo_total        NUMERIC(18, 2),
-    pasivo_corriente    NUMERIC(18, 2),
-    pasivo_total        NUMERIC(18, 2),
-    patrimonio_neto     NUMERIC(18, 2),
+    -- Conexión con S3
+    s3_object_key       TEXT NOT NULL, -- El ID/Path único dentro de tu bucket S3
+    s3_bucket_name      VARCHAR(100),  -- Opcional, si usas varios buckets
+    url_publica         TEXT,          -- Opcional, si generas URLs firmadas temporalmente
     
-    -- Resultados
-    utilidad_neta       NUMERIC(18, 2),
-    
-    -- Capacidad RUP
-    k_contratacion_max  NUMERIC(18, 2),
-    
-    -- Indicadores (Calculados)
-    ind_liquidez        NUMERIC(10, 2) GENERATED ALWAYS AS (activo_corriente / NULLIF(pasivo_corriente,0)) STORED,
-    ind_endeudamiento   NUMERIC(10, 2) GENERATED ALWAYS AS (pasivo_total / NULLIF(activo_total,0)) STORED,
-    
-    UNIQUE(empresa_nit, ano_fiscal)
+    etag_s3             VARCHAR(255),  -- Para verificar integridad o versiones
+    procesado_ia        BOOLEAN DEFAULT FALSE,
+    uploaded_at         TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 4.2 EXPERIENCIA (CONTRATOS EJECUTADOS) + TECH TAGS
-CREATE TABLE IF NOT EXISTS empresa_experiencia (
-    id                    BIGSERIAL PRIMARY KEY,
-    empresa_nit           VARCHAR(20) REFERENCES empresa(nit) ON DELETE CASCADE,
-    numero_contrato       VARCHAR(100),
-    cliente_nombre        VARCHAR(255),
-    sector_cliente        VARCHAR(50), -- 'PUBLICO', 'PRIVADO'
-    objeto_contrato       TEXT,
-    valor_ejecutado_pesos NUMERIC(18, 2),
-    fecha_inicio          DATE,
-    fecha_fin             DATE,
-    codigos_unspsc        TEXT[], 
-    
-    -- Nueva columna agregada: Etiquetado Tech
-    tech_stack_tags       TEXT[], -- Ej: ['AWS', 'Lambda', 'PostgreSQL']
-    
-    es_certificado        BOOLEAN DEFAULT TRUE,
-    
-    -- Vectorización
-    objeto_embedding      vector(1536)
-);
-CREATE INDEX IF NOT EXISTS idx_exp_vec ON empresa_experiencia USING hnsw (objeto_embedding vector_cosine_ops);
-CREATE INDEX IF NOT EXISTS idx_experiencia_tags ON empresa_experiencia USING GIN (tech_stack_tags);
-
--- 4.3 PARTNERSHIPS Y CERTIFICACIONES DE FABRICANTE (NUEVA TABLA)
-CREATE TABLE IF NOT EXISTS empresa_partnerships (
+-- Esta tabla guarda el contenido vectorizado del PDF para búsquedas
+CREATE TABLE IF NOT EXISTS empresa_documentos_chunk (
     id                  BIGSERIAL PRIMARY KEY,
-    empresa_nit         VARCHAR(20) REFERENCES empresa(nit) ON DELETE CASCADE,
-    fabricante          VARCHAR(100), -- Ej: 'Microsoft', 'Oracle'
-    nivel_partner       VARCHAR(100), -- Ej: 'Gold', 'Platinum'
-    id_partner_global   VARCHAR(100), 
-    fecha_vencimiento   DATE,
-    certificado_url     TEXT,
-    created_at          TIMESTAMPTZ DEFAULT NOW()
+    documento_id        BIGINT REFERENCES empresa_documentos(id) ON DELETE CASCADE,
+    empresa_nit         VARCHAR(20) REFERENCES empresa(nit), -- Redundancia útil para filtros rápidos
+    
+    chunk_index         INT,
+    chunk_text          TEXT,          -- El texto extraído del PDF
+    embedding_vec       vector(1536),  -- El vector generado por OpenAI/model
+    
+    metadatos_json      JSONB          -- Ej: { "pagina": 5, "seccion": "Actividades Económicas" }
 );
+
+-- Índice para búsquedas rápidas de similitud
+CREATE INDEX IF NOT EXISTS idx_empresa_docs_vec ON empresa_documentos_chunk USING hnsw (embedding_vec vector_cosine_ops);
 
 -- 4.4 ACTIVOS DE TI / INFRAESTRUCTURA (NUEVA TABLA)
 CREATE TABLE IF NOT EXISTS empresa_activos_ti (
@@ -233,39 +200,6 @@ CREATE TABLE IF NOT EXISTS empresa_activos_ti (
     updated_at          TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 4.5 CAPITAL HUMANO (RRHH) + SKILLS AVANZADOS
-CREATE TABLE IF NOT EXISTS empresa_equipo (
-    id                  BIGSERIAL PRIMARY KEY,
-    empresa_nit         VARCHAR(20) REFERENCES empresa(nit) ON DELETE CASCADE,
-    nombre_completo     VARCHAR(255),
-    titulo_academico    VARCHAR(255),
-    nivel_estudio       VARCHAR(50),
-    anos_experiencia    NUMERIC(4, 1),
-    resumen_perfil      TEXT,
-    
-    -- Nuevas columnas agregadas
-    senior_level        VARCHAR(20), -- 'JUNIOR', 'MID', 'SENIOR'
-    idiomas             JSONB,       -- { "ingles": "B2" }
-    
-    cv_embedding        vector(1536),
-    disponible          BOOLEAN DEFAULT TRUE
-);
-
--- 4.6 SKILLS TÉCNICOS ESPECÍFICOS (NUEVA TABLA)
-CREATE TABLE IF NOT EXISTS equipo_tech_skills (
-    equipo_id           BIGINT REFERENCES empresa_equipo(id) ON DELETE CASCADE,
-    tecnologia          VARCHAR(100), -- 'Java', 'Docker'
-    anos_experiencia    NUMERIC(3, 1),
-    nivel_dominio       INT CHECK (nivel_dominio BETWEEN 1 AND 5),
-    PRIMARY KEY (equipo_id, tecnologia)
-);
-
-CREATE TABLE IF NOT EXISTS equipo_certificaciones (
-    id                  BIGSERIAL PRIMARY KEY,
-    equipo_id           BIGINT REFERENCES empresa_equipo(id) ON DELETE CASCADE,
-    nombre_cert         VARCHAR(255),
-    fecha_vencimiento   DATE
-);
 
 -- 4.7 RIESGOS Y SANCIONES
 CREATE TABLE IF NOT EXISTS empresa_sanciones (
@@ -275,27 +209,6 @@ CREATE TABLE IF NOT EXISTS empresa_sanciones (
     entidad_sancionadora VARCHAR(255),
     fecha_fin           DATE,
     estado_actual       VARCHAR(50)
-);
-
--- =========================================================================
--- 5. MOTOR DE CONSORCIOS (SIMULADOR)
--- =========================================================================
-
-CREATE TABLE IF NOT EXISTS simulacion_consorcios (
-    id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    nombre_alianza      VARCHAR(255),
-    created_at          TIMESTAMPTZ DEFAULT NOW(),
-    
-    liquidez_combinada  NUMERIC(10, 2),
-    patrimonio_total    NUMERIC(18, 2),
-    k_contratacion_total NUMERIC(18, 2)
-);
-
-CREATE TABLE IF NOT EXISTS consorcio_miembros (
-    consorcio_id        UUID REFERENCES simulacion_consorcios(id) ON DELETE CASCADE,
-    empresa_nit         VARCHAR(20) REFERENCES empresa(nit),
-    porcentaje_part     NUMERIC(5, 2),
-    PRIMARY KEY (consorcio_id, empresa_nit)
 );
 
 -- =========================================================================
