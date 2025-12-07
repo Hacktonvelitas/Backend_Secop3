@@ -29,6 +29,9 @@ class Settings(BaseSettings):
 
     # --- App ---
     app_env: str = Field("dev", alias="APP_ENV")
+    
+    # --- Security ---
+    encryption_key: str = Field(..., alias="ENCRYPTION_KEY")
 
     @property
     def s3_presign_endpoint(self) -> str:

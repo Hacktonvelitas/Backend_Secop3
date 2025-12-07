@@ -31,4 +31,5 @@ openpyxl
 passlib[bcrypt]
 PyJWT
 python-multipart
+pycryptodome
 
