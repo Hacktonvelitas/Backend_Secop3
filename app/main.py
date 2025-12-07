@@ -2,26 +2,24 @@ from __future__ import annotations
 
 from datetime import date
 from typing import Optional, List, Dict, Any
+from dataclasses import asdict
 
 from fastapi import FastAPI, Depends, HTTPException, Query, Body
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
-from app.db.init_db import get_db
+from db.deps import get_db
 from db import repo
-# Import updated schema classes
-from db.schema import PublicLicitacion, Empresa, PublicLicitacionChunk
 from operaciones.pipeline import get_available_flows, run_flow_for_one, run_flow_batch
-# Import Matching Logic
-import operaciones.match_inicial as match_i
-import operaciones.match_augmented as match_a
-from ai_router import router as ai_router
+
+# Import Opportunites Router
+from opp_router import router as opp_router
 
 api = FastAPI(title="Licita API", version="1.0.0")
 
-
-api.include_router(ai_router)
+# Include Router
+api.include_router(opp_router)
 
 
 @api.get("/health")
@@ -38,18 +36,20 @@ def index():
             "/health",
             "/licitaciones/search",
             "/licitaciones",
-            "/match/inicial",
-            "/match/augmented",
             "/pipelines/flows",
             "/pipelines/run/{licitacion_id}",
             "/pipelines/batch",
-            "/ai/query",
-            "/ai/graphs/assistant",
+            # Included via opp_router
+            "/opportunities/match/inicial",
+            "/opportunities/match/augmented",
+            "/opportunities/analisis/precios",
+            "/opportunities/ai/query",
+            "/opportunities/ai/graphs/assistant",
         ],
     }
 
 
-# --------- Schemas ----------
+# --------- Schemas (Basic) ----------
 
 class LicitacionIn(BaseModel):
     entidad: str
@@ -57,32 +57,13 @@ class LicitacionIn(BaseModel):
     cuantia: Optional[float] = None
     modalidad: Optional[str] = None
     numero: Optional[str] = None
-    # Add other fields if necessary for creating licitaciones
     fecha_public: Optional[date] = None
-
-
-class MatchRequest(BaseModel):
-    nit_empresa: str
-    fecha_inicio: Optional[date] = None
-    top_k: int = 20
-    min_score: float = 0.5
-
-
-class MatchAugmentedRequest(BaseModel):
-    nit_empresa: str
-    etiquetas_override: Optional[List[str]] = None
-    fecha_inicio: Optional[date] = None
-    top_k: int = 50 
-    final_k: int = 20
 
 
 # --------- Rutas básicas ----------
 
 @api.post("/licitaciones", response_model=dict)
 def create(lic_in: LicitacionIn, db: Session = Depends(get_db)):
-    # Note: repo.create_licitacion might need update if it uses old Licitacion class
-    # Assumed repo is compatible or we fix it if errors arise.
-    # For now, simplistic creation:
     lic = repo.create_licitacion(db, **lic_in.model_dump())
     db.commit()
     return {"id": lic.id}
@@ -101,45 +82,6 @@ def search(q: str, limit: int = 50, db: Session = Depends(get_db)):
         }
         for x in rows
     ]
-
-
-# --------- Rutas Match (Nuevas) ----------
-
-@api.post("/match/inicial", response_model=List[dict])
-def run_match_inicial(
-    payload: MatchRequest, 
-    db: Session = Depends(get_db)
-):
-    """
-    Ejecuta el matching básico basado en vectores.
-    """
-    results = match_i.obtener_oportunidades_empresa(
-        session=db,
-        nit_empresa=payload.nit_empresa,
-        fecha_inicio=payload.fecha_inicio,
-        top_k=payload.top_k,
-        min_score=payload.min_score
-    )
-    return [r.to_dict() for r in results]
-
-
-@api.post("/match/augmented", response_model=List[dict])
-def run_match_augmented(
-    payload: MatchAugmentedRequest,
-    db: Session = Depends(get_db)
-):
-    """
-    Ejecuta matching aumentando score con etiquetas (tags) de la empresa.
-    """
-    results = match_a.obtener_match_augmented(
-        session=db,
-        nit_empresa=payload.nit_empresa,
-        etiquetas_override=payload.etiquetas_override,
-        fecha_inicio=payload.fecha_inicio,
-        top_k=payload.top_k,
-        final_k=payload.final_k
-    )
-    return results
 
 
 # --------- Orquestador (Legacy / Pipeline) ----------
