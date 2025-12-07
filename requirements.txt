@@ -33,3 +33,5 @@ PyJWT
 python-multipart
 pycryptodome
 
+
+boto3
