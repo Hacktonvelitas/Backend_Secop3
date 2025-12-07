@@ -12,6 +12,11 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 import os
 import traceback
+import google.generativeai as genai
+from tavily import TavilyClient
+from tavily import TavilyClient
+import json
+from sklearn.cluster import KMeans
 
 LOGGER = logging.getLogger("match_empresa")
 if not LOGGER.handlers:
@@ -65,27 +70,28 @@ def _to_np_vec(v) -> Optional[np.ndarray]:
 
 def _fetch_empresa_vector(session: Session, nit: str) -> Optional[str]:
     """Fetch the company's vector using a fresh DB connection to avoid transaction issues.
-    Tries empresa_info first, then companies.
+    Queries companies table for razon_social_embedding.
     """
     from sqlalchemy import create_engine, text
     import os
     clean_nit = nit.replace("-", "").replace(" ", "")
     engine = create_engine(os.getenv('DATABASE_URL'))
+    
+    # Use a fresh connection
     with engine.connect() as conn:
-        # Try empresa_info
         try:
-            row = conn.execute(text("SELECT razon_social_vec FROM public.empresa_info WHERE nit = :nit"), {"nit": clean_nit}).fetchone()
+            # Query companies table directly
+            row = conn.execute(
+                text("SELECT razon_social_embedding FROM public.companies WHERE nit = :nit"), 
+                {"nit": clean_nit}
+            ).fetchone()
+            
             if row and row[0] is not None:
                 return row[0]
+                
         except Exception as e:
-            LOGGER.warning(f"Error consulting empresa_info: {e}. Trying companies...")
-        # Try companies
-        try:
-            row2 = conn.execute(text("SELECT razon_social_embedding FROM public.companies WHERE nit = :nit"), {"nit": clean_nit}).fetchone()
-            if row2 and row2[0] is not None:
-                return row2[0]
-        except Exception as e:
-            LOGGER.warning(f"Error consulting companies: {e}")
+            LOGGER.warning(f"Error consulting companies for vector: {e}")
+            
     LOGGER.warning(f"Empresa NIT {clean_nit} sin vector encontrado.")
     return None
 
@@ -161,7 +167,7 @@ def _search_vectors_in_db(
             l.cuantia,
             l.fecha_public
         FROM public.chunks c
-        JOIN public.licitacion l ON c.lic_id::int = l.id
+        JOIN public.licitacion l ON c.lic_id ~ '^[0-9]+$' AND c.lic_id::int = l.id
         WHERE {" AND ".join(where_clauses)}
           AND (1 - (c.embedding_vec <-> (:query_vec)::vector)) >= :min_sim
         ORDER BY similarity DESC
@@ -214,27 +220,30 @@ def obtener_oportunidades_empresa(
     
     # 1. Obtener Vector
     empresa_vec_str = _fetch_empresa_vector(session, nit_empresa)
-    if not empresa_vec_str:
-        return []
-
-    # Desempaquetar rango cuantía
-    min_c, max_c = (None, None)
-    if rango_cuantia:
-        min_c, max_c = rango_cuantia
-
+    
+    matches = []
+    
     # 2. Búsqueda Vectorial Híbrida en DB (Semántica + Filtros)
-    matches = _search_vectors_in_db(
-        session=session,
-        empresa_vec_str=empresa_vec_str,
-        limit=top_k * 2, # Traemos un poco más para tener margen en clustering
-        min_score=min_score,
-        fecha_inicio=fecha_inicio,
-        location_filter=location_filter,
-        sector_keywords=sector_filter,
-        exclusion_keywords=exclusion_filter,
-        min_cuantia=min_c,
-        max_cuantia=max_c
-    )
+    if empresa_vec_str:
+        # Desempaquetar rango cuantía
+        min_c, max_c = (None, None)
+        if rango_cuantia:
+            min_c, max_c = rango_cuantia
+
+        matches = _search_vectors_in_db(
+            session=session,
+            empresa_vec_str=empresa_vec_str,
+            limit=top_k * 2, # Traemos un poco más para tener margen en clustering
+            min_score=min_score,
+            fecha_inicio=fecha_inicio,
+            location_filter=location_filter,
+            sector_keywords=sector_filter,
+            exclusion_keywords=exclusion_filter,
+            min_cuantia=min_c,
+            max_cuantia=max_c
+        )
+    else:
+        LOGGER.info(f"No vector found for NIT {nit_empresa}, skipping vector search.")
     
     LOGGER.info(f"Matches encontrados para NIT {nit_empresa}: {len(matches)}")
 
@@ -274,11 +283,70 @@ def obtener_oportunidades_empresa(
 # Optional LLM fallback implementation (placeholder)
 # ---------------------------------------------------------------------------
 
+def _fetch_empresa_nombre(nit: str) -> str:
+    from sqlalchemy import create_engine, text
+    clean_nit = nit.replace("-", "").replace(" ", "")
+    engine = create_engine(os.getenv('DATABASE_URL'))
+    with engine.connect() as conn:
+        try:
+            row = conn.execute(text("SELECT razon_social FROM public.companies WHERE nit = :nit"), {"nit": clean_nit}).fetchone()
+            if row:
+                return row[0]
+        except Exception:
+            pass
+    return "Empresa"
+
 def _fallback_llm_match(nit: str, top_k: int) -> List[MatchResult]:
     """Generate synthetic matches using an LLM when the DB returns none.
-    This is a minimal stub; in a real implementation you would call the
-    Gemini or OpenAI API to embed the company name and retrieve similar
-    opportunities from an external source or a pre‑computed index.
+    Uses Tavily for web search and Gemini for processing.
     """
-    # Placeholder implementation: return empty list
-    return []
+    gemini_key = os.getenv('GEMINI_API_KEY')
+    tavily_key = os.getenv('TAVILY_API_KEY')
+    
+    if not gemini_key or not tavily_key:
+        LOGGER.warning("Missing API keys for LLM fallback.")
+        return []
+
+    try:
+        genai.configure(api_key=gemini_key)
+        tavily = TavilyClient(api_key=tavily_key)
+        
+        empresa_nombre = _fetch_empresa_nombre(nit)
+        query = f"Licitaciones activas para {empresa_nombre} en Colombia SECOP II"
+        LOGGER.info(f"LLM Fallback: Searching for '{query}'")
+        
+        search_result = tavily.search(query=query, search_depth="advanced", max_results=top_k)
+        context = "\n".join([f"- {r['title']}: {r['content']} ({r['url']})" for r in search_result.get('results', [])])
+        
+        # Using gemini-1.5-flash as a robust, fast model
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        prompt = f"""
+        Act as a procurement expert. Based on these search results for tenders in Colombia:
+        {context}
+        
+        Extract the top {top_k} most relevant opportunities for "{empresa_nombre}".
+        Return a JSON array of objects with these keys:
+        - licitacion_id: int (use a random 6-digit integer if not found)
+        - score: float (relevance 0.0 to 1.0)
+        - best_chunk_text: str (summary of the opportunity including the URL if available)
+        
+        Output ONLY raw JSON. Do not use markdown blocks.
+        """
+        
+        response = model.generate_content(prompt)
+        text_resp = response.text.replace("```json", "").replace("```", "").strip()
+        data = json.loads(text_resp)
+        
+        results = []
+        for item in data:
+            results.append(MatchResult(
+                licitacion_id=int(item.get('licitacion_id', 0)),
+                score=float(item.get('score', 0.0)),
+                best_chunk_text=item.get('best_chunk_text', '')
+            ))
+        return results
+        
+    except Exception as e:
+        LOGGER.error(f"Error in LLM fallback: {e}\n{traceback.format_exc()}")
+        return []

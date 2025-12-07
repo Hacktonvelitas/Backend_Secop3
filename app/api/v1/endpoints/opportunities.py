@@ -93,7 +93,8 @@ def match_augmented_endpoint(
     )
     
     # Convert dataclasses to dicts
-    return [asdict(r) for r in results]
+    # Convert dataclasses to dicts
+    return [r.to_dict() for r in results]
 
 
 @router.post("/analisis/precios")

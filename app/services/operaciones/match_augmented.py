@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 from typing import List, Optional, Tuple, Dict
 from datetime import date
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 
 from sqlalchemy.orm import Session
 from app.services.operaciones.match_inicial import obtener_oportunidades_empresa, MatchResult
@@ -26,6 +26,13 @@ class AugmentedMatchResult:
     final_score: float = 0.0       # (base_score * 0.5) + (ai_score * 0.5)
     ai_explanation: str = ""       # Explicación del LLM
     cumple_requisitos: bool = True # Si el LLM detecta que NO cumple un requisito excluyente (e.g. Ubicación Negativa)
+
+    def to_dict(self):
+        d = asdict(self)
+        # Manually convert base_match using its own to_dict to handle numpy arrays
+        if self.base_match:
+             d['base_match'] = self.base_match.to_dict()
+        return d
 
 def _mock_llm_analysis(empresa_nit: str, match: MatchResult) -> Tuple[float, str, bool]:
     """

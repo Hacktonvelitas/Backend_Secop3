@@ -8,6 +8,8 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_HOST_AUTH_METHOD: trust
+      GEMINI_API_KEY: AIzaSyCOyNLc5YO4ekcQ20Ozr5fIRmDyNzG9SxU
+      TAVILY_API_KEY: ytvly-dev-iIkxpqVIXSG0pRUunkUv1yanl4Hgb74P
       TZ: America/Bogota
     command:
       - "postgres"
@@ -123,6 +125,8 @@ services:
       S3_ACCESS_KEY: ${S3_ACCESS_KEY}
       S3_SECRET_KEY: ${S3_SECRET_KEY}
       S3_BUCKET: ${S3_BUCKET}
+      GEMINI_API_KEY: AIzaSyCOyNLc5YO4ekcQ20Ozr5fIRmDyNzG9SxU
+      TAVILY_API_KEY: ytvly-dev-iIkxpqVIXSG0pRUunkUv1yanl4Hgb74P
     ports:
       - "${APP_PORT}:8000"
     volumes:
