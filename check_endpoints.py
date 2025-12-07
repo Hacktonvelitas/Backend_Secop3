@@ -39,3 +39,4 @@ if __name__ == "__main__":
 
     # 3. Market Analysis
     test_endpoint("Analisis Precios", f"{BASE_URL}/{NIT}/market-analysis?top_k_analysis=50")
+

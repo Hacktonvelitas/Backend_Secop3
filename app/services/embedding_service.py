@@ -30,3 +30,5 @@ class EmbeddingService:
         except Exception as e:
             LOGGER.error(f"Error generating embedding: {e}")
             return []
+
+
