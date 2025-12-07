@@ -8,10 +8,8 @@ from dataclasses import asdict
 from sqlalchemy.orm import Session
 
 from app.db.deps import get_db
-# Import logic
-# Note: Using try/except block in those files for imports, here we assume app package structure work or we fix appropriately
-from app.operaciones.match_inicial import obtener_oportunidades_empresa
-from app.operaciones.match_augmented import obtener_match_augmented
+from app.services.match_service import MatchService
+from app.services.price_service import PriceService
 
 # Existing AI imports
 from app.IA.query_data import process_query
@@ -62,26 +60,20 @@ def match_inicial_endpoint(
     """
     Ejecuta el matching vectorial + filtros duros (Niche Filter).
     """
-    # Prepare range tuple if valid
-    rango = None
-    if body.min_cuantia is not None or body.max_cuantia is not None:
-        rango = (body.min_cuantia, body.max_cuantia)
-
-    results = obtener_oportunidades_empresa(
-        session=db,
+    service = MatchService(db)
+    results = service.run_match_inicial(
         nit_empresa=body.nit_empresa,
-        fecha_inicio=body.fecha_inicio,
         top_k=body.top_k,
         min_score=body.min_score,
-        sector_filter=body.sector_keywords,
-        exclusion_filter=body.exclusion_keywords,
+        fecha_inicio=body.fecha_inicio,
         location_filter=body.location_filter,
-        rango_cuantia=rango,
-        n_clusters=3 # default
+        sector_keywords=body.sector_keywords,
+        exclusion_keywords=body.exclusion_keywords,
+        min_cuantia=body.min_cuantia,
+        max_cuantia=body.max_cuantia
     )
     
-    # Return as dicts
-    return [res.to_dict() for res in results]
+    return results
 
 
 @router.post("/match/augmented")
@@ -93,47 +85,25 @@ def match_augmented_endpoint(
     Ejecuta el pipeline completo: 
     Match Inicial (Vectorial) -> Filtros IA Copilot -> Scoring 50/50.
     """
-    # Prepare range tuple
-    rango = None
-    if body.min_cuantia is not None or body.max_cuantia is not None:
-        rango = (body.min_cuantia, body.max_cuantia)
-
-    results = obtener_match_augmented(
-        session=db,
+    service = MatchService(db)
+    results = service.run_match_augmented(
         nit_empresa=body.nit_empresa,
-        fecha_inicio=body.fecha_inicio,
         top_k=body.top_k,
         min_score_inicial=body.min_score,
-        sector_filter=body.sector_keywords,
-        exclusion_filter=body.exclusion_keywords,
+        fecha_inicio=body.fecha_inicio,
         location_filter=body.location_filter,
-        rango_cuantia=rango
+        sector_keywords=body.sector_keywords,
+        exclusion_keywords=body.exclusion_keywords,
+        min_cuantia=body.min_cuantia,
+        max_cuantia=body.max_cuantia
     )
     
-    # Return structure
-    return [
-        {
-            "licitacion_id": r.base_match.licitacion_id,
-            "entidad": r.base_match.entidad,
-            "objeto": r.base_match.objeto,
-            "base_score": r.base_match.score,
-            "ai_score": r.ai_score,
-            "final_score": r.final_score,
-            "ai_explanation": r.ai_explanation,
-            "cumple_requisitos": r.cumple_requisitos,
-            # include other fields if needed
-            "cuantia": r.base_match.cuantia,
-            "fecha_public": r.base_match.fecha_public
-        }
-        for r in results
-    ]
+    return results
 
 
 # ----------------------------------------------------
 # PRECIOS ENDPOINT
 # ----------------------------------------------------
-
-from app.operaciones import precios_IQ
 
 class AnalysisRequest(BaseModel):
     nit_empresa: str
@@ -148,13 +118,13 @@ def analisis_precios_endpoint(
     """
     Analiza rangos de precios basados en oportunidades similares.
     """
-    result = precios_IQ.analizar_precios_empresa(
-        session=db,
+    service = PriceService(db)
+    result = service.analizar_precios_empresa(
         nit_empresa=body.nit_empresa,
         top_k_analysis=body.top_k,
         sector_keywords=body.sector_keywords
     )
-    return asdict(result) # Requires dataclasses.asdict
+    return asdict(result) 
 
 
 

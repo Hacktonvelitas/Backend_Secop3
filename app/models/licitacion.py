@@ -1,25 +1,14 @@
 from __future__ import annotations
-from datetime import date, datetime
 from typing import List, Optional
-
+from datetime import date, datetime
 from sqlalchemy import (
-    Boolean,
-    Date,
-    DateTime,
-    ForeignKey,
-    Index,
-    Integer,
-    BigInteger,
-    Numeric,
-    String,
-    Text,
-    func,
+    Boolean, Date, DateTime, ForeignKey, Index, Integer, BigInteger, Numeric, String, Text
 )
 from sqlalchemy.dialects.postgresql import JSONB, ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from pgvector.sqlalchemy import Vector
 
-from app.models.base import Base, EMBED_DIMS
+from app.models.base import Base, EMBED_DIMS_OPENAI
 
 # =========================================================================
 # 2. ZONA DE STAGING (INGESTA CRUDA)
@@ -45,7 +34,7 @@ class StagingDocuments(Base):
     source_name: Mapped[Optional[str]] = mapped_column(Text)
     source_ext: Mapped[Optional[str]] = mapped_column(Text)
     sha256: Mapped[Optional[str]] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()")
 
 
 class StagingChunks(Base):
@@ -56,7 +45,7 @@ class StagingChunks(Base):
     lic_id: Mapped[Optional[str]] = mapped_column(Text)
     doc_id: Mapped[Optional[int]] = mapped_column(ForeignKey("public.staging_documents.doc_id"))
     text_content: Mapped[Optional[str]] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()")
 
 
 # =========================================================================
@@ -99,15 +88,15 @@ class PublicLicitacion(Base):
     plazo_meses: Mapped[Optional[int]] = mapped_column(Integer)
 
     # Clasificación
-    codigos_unspsc: Mapped[Optional[List[str]]] = mapped_column(ARRAY(Text)) # TEXT[] in DDL
+    codigos_unspsc: Mapped[Optional[List[str]]] = mapped_column(ARRAY(Text))
     act_econ: Mapped[Optional[str]] = mapped_column(String(255))
 
     # Requisitos Habilitantes (Flags rápidos)
     req_cert_9001: Mapped[bool] = mapped_column(Boolean, default=False)
     req_cert_27001: Mapped[bool] = mapped_column(Boolean, default=False)
 
-    # IA
-    objeto_vec: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS))
+    # IA (1536 dims)
+    objeto_vec: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS_OPENAI))
 
     # Relaciones
     criterios: Mapped[List["LicitacionCriterios"]] = relationship(back_populates="licitacion", cascade="all, delete-orphan")
@@ -127,7 +116,7 @@ class LicitacionCriterios(Base):
     tipo_criterio: Mapped[Optional[str]] = mapped_column(String(50))
     puntaje_maximo: Mapped[Optional[int]] = mapped_column(Integer)
     descripcion_regla: Mapped[Optional[str]] = mapped_column(Text)
-    embedding_regla: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS))
+    embedding_regla: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS_OPENAI))
 
     licitacion: Mapped["PublicLicitacion"] = relationship(back_populates="criterios")
 
@@ -142,7 +131,7 @@ class LicitacionObservaciones(Base):
     texto_pregunta: Mapped[Optional[str]] = mapped_column(Text)
     texto_respuesta: Mapped[Optional[str]] = mapped_column(Text)
     cambio_requisito: Mapped[bool] = mapped_column(Boolean, default=False)
-    embedding_contexto: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS))
+    embedding_contexto: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS_OPENAI))
 
     licitacion: Mapped["PublicLicitacion"] = relationship(back_populates="observaciones")
 
@@ -171,7 +160,7 @@ class PublicLicitacionChunk(Base):
     licitacion_id: Mapped[int] = mapped_column(ForeignKey("public.public_licitacion.id"))
     chunk_idx: Mapped[int] = mapped_column(Integer)
     chunk_text: Mapped[Optional[str]] = mapped_column(Text)
-    embedding_vec: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS))
+    embedding_vec: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS_OPENAI))
     metadatos_json: Mapped[Optional[dict]] = mapped_column(JSONB)
 
     documento: Mapped["LicitacionDocumentos"] = relationship(back_populates="chunks")

@@ -1,29 +1,16 @@
 from __future__ import annotations
-from datetime import date, datetime
 from typing import List, Optional
-
+from datetime import date, datetime
 from sqlalchemy import (
-    Boolean,
-    Date,
-    DateTime,
-    ForeignKey,
-    Integer,
-    BigInteger,
-    String,
-    Text,
-    func,
+    Boolean, Date, DateTime, ForeignKey, Integer, BigInteger, String, Text
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from pgvector.sqlalchemy import Vector
 
-from app.models.base import Base
+from app.models.base import Base, EMBED_DIMS_LOCAL
 
-# =========================================================================
-# 4. NÚCLEO EMPRESARIAL
-# =========================================================================
-
-class Empresa(Base):
-    __tablename__ = "empresa"
+class EmpresaInfo(Base):
+    __tablename__ = "empresa_info"
     __table_args__ = {"schema": "public"}
 
     nit: Mapped[str] = mapped_column(String(20), primary_key=True)
@@ -46,19 +33,11 @@ class Empresa(Base):
     fecha_constitucion: Mapped[Optional[date]] = mapped_column(Date)
     anios_existencia: Mapped[Optional[int]] = mapped_column(Integer)
     tamano_empresarial: Mapped[Optional[str]] = mapped_column(String(20))
-
-    # Relaciones
-    documentos: Mapped[List["EmpresaDocumentos"]] = relationship(back_populates="empresa", cascade="all, delete-orphan")
-    usuario: Mapped["Usuario"] = relationship(back_populates="empresa", uselist=False)
-    match_runs: Mapped[List["MatchRun"]] = relationship(back_populates="empresa")
     
-    # Conexión con tabla Companies (Vectores)
-    # Se usa primaryjoin porque no hay FK explícita en el DDL de companies
-    vector_data: Mapped[Optional["Companies"]] = relationship(
-        primaryjoin="Empresa.nit == foreign(Companies.nit)",
-        uselist=False,
-        viewonly=True
-    )
+    # Relationships
+    documentos: Mapped[List["EmpresaDocumentos"]] = relationship(back_populates="empresa", cascade="all, delete-orphan")
+    usuarios: Mapped[List["Usuario"]] = relationship(back_populates="empresa")
+    match_runs: Mapped[List["MatchRun"]] = relationship(back_populates="empresa")
 
 
 class Companies(Base):
@@ -69,18 +48,17 @@ class Companies(Base):
     razon_social: Mapped[Optional[str]] = mapped_column(Text)
     nit: Mapped[Optional[str]] = mapped_column(Text)
     muncomercial: Mapped[Optional[str]] = mapped_column(Text)
-    
     ciiu1: Mapped[Optional[str]] = mapped_column(Text)
     ciiu2: Mapped[Optional[str]] = mapped_column(Text)
     ciiu3: Mapped[Optional[str]] = mapped_column(Text)
     ciiu4: Mapped[Optional[str]] = mapped_column(Text)
     
-    # Vectores (Dimension 768 según DDL)
-    razon_social_embedding: Mapped[Optional[List[float]]] = mapped_column(Vector(768))
-    ciiu1_embedding: Mapped[Optional[List[float]]] = mapped_column(Vector(768))
-    ciiu2_embedding: Mapped[Optional[List[float]]] = mapped_column(Vector(768))
-    ciiu3_embedding: Mapped[Optional[List[float]]] = mapped_column(Vector(768))
-    ciiu4_embedding: Mapped[Optional[List[float]]] = mapped_column(Vector(768))
+    # Embeddings (768 dims)
+    razon_social_embedding: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS_LOCAL))
+    ciiu1_embedding: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS_LOCAL))
+    ciiu2_embedding: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS_LOCAL))
+    ciiu3_embedding: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS_LOCAL))
+    ciiu4_embedding: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS_LOCAL))
 
 
 class EmpresaDocumentos(Base):
@@ -88,16 +66,18 @@ class EmpresaDocumentos(Base):
     __table_args__ = {"schema": "public"}
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    empresa_nit: Mapped[str] = mapped_column(ForeignKey("public.empresa.nit", ondelete="CASCADE"))
+    # FK references empresa_info.nit 
+    empresa_nit: Mapped[str] = mapped_column(ForeignKey("public.empresa_info.nit", ondelete="CASCADE"))
     nombre_archivo: Mapped[Optional[str]] = mapped_column(String(255))
     tipo_documento: Mapped[Optional[str]] = mapped_column(String(50))
     
+    # Conexión con S3
     s3_object_key: Mapped[str] = mapped_column(Text)
     s3_bucket_name: Mapped[Optional[str]] = mapped_column(String(100))
     url_publica: Mapped[Optional[str]] = mapped_column(Text)
     
     etag_s3: Mapped[Optional[str]] = mapped_column(String(255))
     procesado_ia: Mapped[bool] = mapped_column(Boolean, default=False)
-    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()")
 
-    empresa: Mapped["Empresa"] = relationship(back_populates="documentos")
+    empresa: Mapped["EmpresaInfo"] = relationship(back_populates="documentos")
