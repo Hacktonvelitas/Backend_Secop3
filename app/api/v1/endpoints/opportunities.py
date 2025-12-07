@@ -5,8 +5,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.api.deps import get_db
-from app.services.match_service import MatchService
-from app.services.price_service import PriceService
+
+# Import Legacy Operations
+from app.services.operaciones.match_inicial import obtener_oportunidades_empresa
+from app.services.operaciones.match_augmented import obtener_match_augmented
+from app.services.operaciones.precios_IQ import analizar_precios_empresa
 
 router = APIRouter()
 
@@ -42,20 +45,25 @@ def match_inicial_endpoint(
     """
     Ejecuta el matching vectorial + filtros duros (Niche Filter).
     """
-    service = MatchService(db)
-    results = service.run_match_inicial(
+    # Prepare range tuple if both exist
+    rango_cuantia = None
+    if body.min_cuantia is not None and body.max_cuantia is not None:
+        rango_cuantia = (body.min_cuantia, body.max_cuantia)
+
+    results = obtener_oportunidades_empresa(
+        session=db,
         nit_empresa=body.nit_empresa,
+        fecha_inicio=body.fecha_inicio,
         top_k=body.top_k,
         min_score=body.min_score,
-        fecha_inicio=body.fecha_inicio,
+        sector_filter=body.sector_keywords,
+        exclusion_filter=body.exclusion_keywords,
         location_filter=body.location_filter,
-        sector_keywords=body.sector_keywords,
-        exclusion_keywords=body.exclusion_keywords,
-        min_cuantia=body.min_cuantia,
-        max_cuantia=body.max_cuantia
+        rango_cuantia=rango_cuantia
     )
     
-    return results
+    # Convert dataclasses to dicts
+    return [r.to_dict() for r in results]
 
 
 @router.post("/match/augmented")
@@ -67,20 +75,25 @@ def match_augmented_endpoint(
     Ejecuta el pipeline completo: 
     Match Inicial (Vectorial) -> Filtros IA Copilot -> Scoring 50/50.
     """
-    service = MatchService(db)
-    results = service.run_match_augmented(
+    # Prepare range tuple
+    rango_cuantia = None
+    if body.min_cuantia is not None and body.max_cuantia is not None:
+        rango_cuantia = (body.min_cuantia, body.max_cuantia)
+
+    results = obtener_match_augmented(
+        session=db,
         nit_empresa=body.nit_empresa,
+        fecha_inicio=body.fecha_inicio,
         top_k=body.top_k,
         min_score_inicial=body.min_score,
-        fecha_inicio=body.fecha_inicio,
+        sector_filter=body.sector_keywords,
+        exclusion_filter=body.exclusion_keywords,
         location_filter=body.location_filter,
-        sector_keywords=body.sector_keywords,
-        exclusion_keywords=body.exclusion_keywords,
-        min_cuantia=body.min_cuantia,
-        max_cuantia=body.max_cuantia
+        rango_cuantia=rango_cuantia
     )
     
-    return results
+    # Convert dataclasses to dicts
+    return [asdict(r) for r in results]
 
 
 @router.post("/analisis/precios")
@@ -91,8 +104,8 @@ def analisis_precios_endpoint(
     """
     Analiza rangos de precios basados en oportunidades similares.
     """
-    service = PriceService(db)
-    result = service.analizar_precios_empresa(
+    result = analizar_precios_empresa(
+        session=db,
         nit_empresa=body.nit_empresa,
         top_k_analysis=body.top_k,
         sector_keywords=body.sector_keywords
