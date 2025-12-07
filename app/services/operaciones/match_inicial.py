@@ -1,105 +1,73 @@
-# app/operaciones/match_inicial.py
+# app/services/operaciones/match_inicial.py
+"""
+Match service for finding licitaciones that match a company's profile.
+Uses cosine similarity between company embeddings and chunk embeddings.
+"""
 from __future__ import annotations
 
 import logging
 import sys
-import numpy as np
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple
 from datetime import date
 from dataclasses import dataclass, asdict
 
+import numpy as np
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-import os
-import traceback
-import google.generativeai as genai
-from tavily import TavilyClient
-from tavily import TavilyClient
-import json
-from sklearn.cluster import KMeans
 
-LOGGER = logging.getLogger("match_empresa")
+LOGGER = logging.getLogger(__name__)
+
 if not LOGGER.handlers:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(logging.Formatter("[match_empresa] %(levelname)s %(message)s"))
     LOGGER.addHandler(handler)
 LOGGER.setLevel("INFO")
-# Configuration flag for optional LLM fallback when DB returns no matches
-USE_LLM_FALLBACK = os.getenv('USE_LLM_FALLBACK', 'true').lower() == 'true'
 
-# ============================================================
-# DTOs
-# ============================================================
 
 @dataclass
 class MatchResult:
+    """Result of a match between a company and a licitacion chunk."""
     licitacion_id: int
-    score: float          
-    best_chunk_text: str  
+    score: float
+    chunk_text: str
     entidad: str
     objeto: str
-    cuantia: float        
-    fecha_public: str     
-    cluster_id: int = -1
-    vector_licitacion: Optional[np.ndarray] = None 
+    cuantia: float
+    fecha_public: str
+    ubicacion: str
+    modalidad: str
 
     def to_dict(self):
-        d = asdict(self)
-        if 'vector_licitacion' in d:
-             del d['vector_licitacion']
-        return d
+        return asdict(self)
 
-# ============================================================
-# Helpers
-# ============================================================
 
-def _to_np_vec(v) -> Optional[np.ndarray]:
-    """Convierte la salida de pgvector a numpy array."""
-    if v is None: return None
-    if isinstance(v, str):
-        # pgvector a veces devuelve string "[0.1, ...]"
-        s = v.strip().lstrip("[").rstrip("]")
-        try:
-             return np.fromstring(s, sep=",", dtype=np.float32)
-        except: return None
-    return np.array(v, dtype=np.float32)
-
-# ============================================================
-# Core Logic
-# ============================================================
-
-def _fetch_empresa_vector(session: Session, nit: str) -> Optional[str]:
-    """Fetch the company's vector using a fresh DB connection to avoid transaction issues.
-    Queries companies table for razon_social_embedding.
+def _fetch_company_embedding(session: Session, nit: str) -> Optional[str]:
     """
-    from sqlalchemy import create_engine, text
-    import os
-    clean_nit = nit.replace("-", "").replace(" ", "")
-    engine = create_engine(os.getenv('DATABASE_URL'))
+    Get the razon_social_embedding for a company by NIT.
+    """
+    clean_nit = nit.replace("-", "").replace(" ", "").strip()
     
-    # Use a fresh connection
-    with engine.connect() as conn:
-        try:
-            # Query companies table directly
-            row = conn.execute(
-                text("SELECT razon_social_embedding FROM public.companies WHERE nit = :nit"), 
-                {"nit": clean_nit}
-            ).fetchone()
-            
-            if row and row[0] is not None:
-                return row[0]
-                
-        except Exception as e:
-            LOGGER.warning(f"Error consulting companies for vector: {e}")
-            
-    LOGGER.warning(f"Empresa NIT {clean_nit} sin vector encontrado.")
+    sql = text("""
+        SELECT razon_social_embedding 
+        FROM companies 
+        WHERE nit = :nit
+        LIMIT 1
+    """)
+    
+    row = session.execute(sql, {"nit": clean_nit}).fetchone()
+    
+    if row and row[0] is not None:
+        return row[0]
+    
+    LOGGER.warning(f"Company NIT {clean_nit} not found or has no embedding.")
     return None
 
-def _search_vectors_in_db(
-    session: Session, 
-    empresa_vec_str: str,
-    limit: int = 100,
-    min_score: float = 0.6,
+
+def _search_matching_chunks(
+    session: Session,
+    company_embedding: str,
+    top_k: int = 20,
+    min_score: float = 0.5,
     fecha_inicio: Optional[date] = None,
     location_filter: Optional[str] = None,
     sector_keywords: Optional[List[str]] = None,
@@ -107,246 +75,137 @@ def _search_vectors_in_db(
     min_cuantia: Optional[float] = None,
     max_cuantia: Optional[float] = None
 ) -> List[MatchResult]:
+    """
+    Search for chunks that match the company embedding using cosine similarity.
+    Joins through licitacion_keymap to get licitacion metadata.
+    """
     
-    # Construcción dinámica de filtros WHERE
+    # Build WHERE clauses
     where_clauses = ["c.embedding_vec IS NOT NULL"]
     params = {
-        "query_vec": empresa_vec_str, 
-        "limit": limit,
-        "min_sim": min_score
+        "company_vec": company_embedding,
+        "min_sim": min_score,
+        "limit": top_k * 3  # Get more to allow filtering
     }
-
-    # 1. Filtro Fecha
+    
+    # Date filter
     if fecha_inicio:
         where_clauses.append("l.fecha_public >= :fecha_inicio")
         params["fecha_inicio"] = fecha_inicio
-
-    # 2. Filtro Ubicación
+    
+    # Location filter
     if location_filter:
         where_clauses.append("l.ubicacion ILIKE :loc")
         params["loc"] = f"%{location_filter}%"
-
-    # 3. Filtro Presupuesto (Cuantía)
-    if min_cuantia:
+    
+    # Cuantia range
+    if min_cuantia is not None:
         where_clauses.append("l.cuantia >= :min_cuantia")
         params["min_cuantia"] = min_cuantia
-    if max_cuantia:
+    if max_cuantia is not None:
         where_clauses.append("l.cuantia <= :max_cuantia")
         params["max_cuantia"] = max_cuantia
-
-    # 4. Filtro Palabras Clave Positivas (Sector)
+    
+    # Sector keywords (positive filter)
     if sector_keywords:
         or_conds = []
         for i, kw in enumerate(sector_keywords):
             key = f"kw_inc_{i}"
-            # Buscamos en Actividad Económica u Objeto
             or_conds.append(f"(l.act_econ ILIKE :{key} OR l.objeto ILIKE :{key})")
             params[key] = f"%{kw}%"
         if or_conds:
             where_clauses.append(f"({' OR '.join(or_conds)})")
-
-    # 5. Filtro Palabras Clave NEGATIVAS (Exclusión)
+    
+    # Exclusion keywords (negative filter)
     if exclusion_keywords:
         for i, kw in enumerate(exclusion_keywords):
             key = f"kw_exc_{i}"
             where_clauses.append(f"l.objeto NOT ILIKE :{key}")
-            # Tambien excluir si está en el chunk de texto encontrado
-            where_clauses.append(f"c.chunk_text NOT ILIKE :{key}") 
             params[key] = f"%{kw}%"
-
-    # Query optimizada con operador <=> (Cosine Distance)
-    # Nota: 1 - (vec <=> vec) convierte la distancia en similitud (0 a 1)
+    
     sql = f"""
-        SELECT 
-            c.lic_id as licitacion_id,
-            c.text as chunk_text,
-            c.embedding_vec,
-            (1 - (c.embedding_vec <-> (:query_vec)::vector)) as similarity,
+        SELECT DISTINCT ON (l.id)
+            l.id AS licitacion_id,
+            1 - (c.embedding_vec <=> CAST(:company_vec AS vector)) AS similarity,
+            c.text AS chunk_text,
             l.entidad,
             l.objeto,
             l.cuantia,
-            l.fecha_public
-        FROM public.chunks c
-        JOIN public.licitacion l ON c.lic_id ~ '^[0-9]+$' AND c.lic_id::int = l.id
+            l.fecha_public,
+            l.ubicacion,
+            l.modalidad
+        FROM chunks c
+        JOIN licitacion_keymap k ON k.lic_ext_id = c.lic_id
+        JOIN licitacion l ON l.id = k.licitacion_id
         WHERE {" AND ".join(where_clauses)}
-          AND (1 - (c.embedding_vec <-> (:query_vec)::vector)) >= :min_sim
-        ORDER BY similarity DESC
-        LIMIT :limit;
+          AND 1 - (c.embedding_vec <=> CAST(:company_vec AS vector)) >= :min_sim
+        ORDER BY l.id, similarity DESC
     """
-
-    try:
-        rows = session.execute(text(sql), params).fetchall()
-    except Exception as e:
-        LOGGER.error(f"Error executing vector search query: {e}\n{traceback.format_exc()}")
-        rows = []
+    
+    # Wrap to order by similarity globally
+    sql = f"""
+        SELECT * FROM ({sql}) sub
+        ORDER BY similarity DESC
+        LIMIT :limit
+    """
+    
+    rows = session.execute(text(sql), params).fetchall()
     
     results = []
-    seen_ids = set()
-
-    for lid, txt, vec_raw, score, ent, obj, cuant, fecha in rows:
-        if lid in seen_ids:
-            continue
-        seen_ids.add(lid)
-
+    for row in rows:
         results.append(MatchResult(
-            licitacion_id=lid,
-            score=float(score),
-            best_chunk_text=txt,
-            entidad=ent,
-            objeto=obj,
-            cuantia=float(cuant) if cuant else 0.0,
-            fecha_public=str(fecha) if fecha else None,
-            vector_licitacion=_to_np_vec(vec_raw)
+            licitacion_id=row.licitacion_id,
+            score=float(row.similarity),
+            chunk_text=row.chunk_text or "",
+            entidad=row.entidad or "",
+            objeto=row.objeto or "",
+            cuantia=float(row.cuantia) if row.cuantia else 0.0,
+            fecha_public=str(row.fecha_public) if row.fecha_public else "",
+            ubicacion=row.ubicacion or "",
+            modalidad=row.modalidad or ""
         ))
-        
-    return results
+    
+    return results[:top_k]
 
-# ============================================================
-# Función Principal
-# ============================================================
 
 def obtener_oportunidades_empresa(
-    session: Session, 
-    nit_empresa: str, 
+    session: Session,
+    nit_empresa: str,
     fecha_inicio: Optional[date] = None,
-    top_k: int = 20, 
+    top_k: int = 20,
     min_score: float = 0.5,
-    n_clusters: int = 3,
-    sector_filter: Optional[List[str]] = None,     # Ej: ['Tecnología', 'Software']
-    exclusion_filter: Optional[List[str]] = None,  # Ej: ['Aseo', 'Cafetería', 'Obra Civil']
+    sector_filter: Optional[List[str]] = None,
+    exclusion_filter: Optional[List[str]] = None,
     location_filter: Optional[str] = None,
-    rango_cuantia: Optional[Tuple[float, float]] = None # Ej: (100M, 5000M)
+    rango_cuantia: Optional[Tuple[float, float]] = None
 ) -> List[MatchResult]:
-    
-    # 1. Obtener Vector
-    empresa_vec_str = _fetch_empresa_vector(session, nit_empresa)
-    
-    matches = []
-    
-    # 2. Búsqueda Vectorial Híbrida en DB (Semántica + Filtros)
-    if empresa_vec_str:
-        # Desempaquetar rango cuantía
-        min_c, max_c = (None, None)
-        if rango_cuantia:
-            min_c, max_c = rango_cuantia
-
-        matches = _search_vectors_in_db(
-            session=session,
-            empresa_vec_str=empresa_vec_str,
-            limit=top_k * 2, # Traemos un poco más para tener margen en clustering
-            min_score=min_score,
-            fecha_inicio=fecha_inicio,
-            location_filter=location_filter,
-            sector_keywords=sector_filter,
-            exclusion_keywords=exclusion_filter,
-            min_cuantia=min_c,
-            max_cuantia=max_c
-        )
-    else:
-        LOGGER.info(f"No vector found for NIT {nit_empresa}, skipping vector search.")
-    
-    LOGGER.info(f"Matches encontrados para NIT {nit_empresa}: {len(matches)}")
-
-    # If no matches and fallback enabled, attempt LLM fallback
-    if not matches and USE_LLM_FALLBACK:
-        try:
-            matches = _fallback_llm_match(nit_empresa, top_k)
-            LOGGER.info("LLM fallback provided %d matches", len(matches))
-        except Exception as e:
-            LOGGER.error(f"LLM fallback failed: {e}\n{traceback.format_exc()}")
-    if not matches:
-        return []
-    # Recortar al top_k solicitado
-    matches = matches[:top_k]
-
-    # 3. Clustering (K-Means)
-    # Agrupa los resultados por similitud temática visual
-    if len(matches) >= n_clusters:
-        try:
-            vecs = [m.vector_licitacion for m in matches if m.vector_licitacion is not None]
-            if len(vecs) >= n_clusters:
-                X = np.vstack(vecs)
-                # Validamos que no haya NaNs
-                X = np.nan_to_num(X)
-                
-                kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-                labels = kmeans.fit_predict(X)
-                
-                for i, m in enumerate(matches):
-                    m.cluster_id = int(labels[i])
-        except Exception as e:
-            LOGGER.error(f"Error en clustering: {e}")
-
-    return matches
-
-# ---------------------------------------------------------------------------
-# Optional LLM fallback implementation (placeholder)
-# ---------------------------------------------------------------------------
-
-def _fetch_empresa_nombre(nit: str) -> str:
-    from sqlalchemy import create_engine, text
-    clean_nit = nit.replace("-", "").replace(" ", "")
-    engine = create_engine(os.getenv('DATABASE_URL'))
-    with engine.connect() as conn:
-        try:
-            row = conn.execute(text("SELECT razon_social FROM public.companies WHERE nit = :nit"), {"nit": clean_nit}).fetchone()
-            if row:
-                return row[0]
-        except Exception:
-            pass
-    return "Empresa"
-
-def _fallback_llm_match(nit: str, top_k: int) -> List[MatchResult]:
-    """Generate synthetic matches using an LLM when the DB returns none.
-    Uses Tavily for web search and Gemini for processing.
     """
-    gemini_key = os.getenv('GEMINI_API_KEY')
-    tavily_key = os.getenv('TAVILY_API_KEY')
+    Main function to get matching opportunities for a company by NIT.
+    """
     
-    if not gemini_key or not tavily_key:
-        LOGGER.warning("Missing API keys for LLM fallback.")
+    # 1. Get company embedding
+    company_embedding = _fetch_company_embedding(session, nit_empresa)
+    if not company_embedding:
         return []
-
-    try:
-        genai.configure(api_key=gemini_key)
-        tavily = TavilyClient(api_key=tavily_key)
-        
-        empresa_nombre = _fetch_empresa_nombre(nit)
-        query = f"Licitaciones activas para {empresa_nombre} en Colombia SECOP II"
-        LOGGER.info(f"LLM Fallback: Searching for '{query}'")
-        
-        search_result = tavily.search(query=query, search_depth="advanced", max_results=top_k)
-        context = "\n".join([f"- {r['title']}: {r['content']} ({r['url']})" for r in search_result.get('results', [])])
-        
-        # Using gemini-1.5-flash as a robust, fast model
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        
-        prompt = f"""
-        Act as a procurement expert. Based on these search results for tenders in Colombia:
-        {context}
-        
-        Extract the top {top_k} most relevant opportunities for "{empresa_nombre}".
-        Return a JSON array of objects with these keys:
-        - licitacion_id: int (use a random 6-digit integer if not found)
-        - score: float (relevance 0.0 to 1.0)
-        - best_chunk_text: str (summary of the opportunity including the URL if available)
-        
-        Output ONLY raw JSON. Do not use markdown blocks.
-        """
-        
-        response = model.generate_content(prompt)
-        text_resp = response.text.replace("```json", "").replace("```", "").strip()
-        data = json.loads(text_resp)
-        
-        results = []
-        for item in data:
-            results.append(MatchResult(
-                licitacion_id=int(item.get('licitacion_id', 0)),
-                score=float(item.get('score', 0.0)),
-                best_chunk_text=item.get('best_chunk_text', '')
-            ))
-        return results
-        
-    except Exception as e:
-        LOGGER.error(f"Error in LLM fallback: {e}\n{traceback.format_exc()}")
-        return []
+    
+    # Unpack cuantia range
+    min_c, max_c = (None, None)
+    if rango_cuantia:
+        min_c, max_c = rango_cuantia
+    
+    # 2. Search matching chunks
+    matches = _search_matching_chunks(
+        session=session,
+        company_embedding=company_embedding,
+        top_k=top_k,
+        min_score=min_score,
+        fecha_inicio=fecha_inicio,
+        location_filter=location_filter,
+        sector_keywords=sector_filter,
+        exclusion_keywords=exclusion_filter,
+        min_cuantia=min_c,
+        max_cuantia=max_c
+    )
+    
+    LOGGER.info(f"Found {len(matches)} matches for NIT {nit_empresa}")
+    return matches

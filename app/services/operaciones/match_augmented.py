@@ -1,118 +1,112 @@
-# app/operaciones/match_augmented.py
-# Este módulo se encarga de usar LLM (OpenAI) para re-rankear y verificar reglas complejas.
-# Se basa en los resultados de match_inicial (Vectorial + Filtros Duros).
-
+# app/services/operaciones/match_augmented.py
+"""
+Augmented match service - uses LLM scoring on top of vector similarity.
+"""
 from __future__ import annotations
 
 import logging
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple
 from datetime import date
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 
 from sqlalchemy.orm import Session
 from app.services.operaciones.match_inicial import obtener_oportunidades_empresa, MatchResult
 
-# Si tienes un servicio de OpenAI configurado:
-# from app.servicios.llm_service import analizar_match_con_gpt  (Ejemplo hipotético)
-# Como no tengo acceso a tu libreria de LLM interna, simularé la llamada o asumiré una función simple.
-
 LOGGER = logging.getLogger("match_augmented")
 LOGGER.setLevel("INFO")
 
+
 @dataclass
 class AugmentedMatchResult:
-    base_match: MatchResult
-    ai_score: float = 0.0          # Score dado por el LLM (0.0 a 1.0)
-    final_score: float = 0.0       # (base_score * 0.5) + (ai_score * 0.5)
-    ai_explanation: str = ""       # Explicación del LLM
-    cumple_requisitos: bool = True # Si el LLM detecta que NO cumple un requisito excluyente (e.g. Ubicación Negativa)
+    """Match result with AI scoring."""
+    licitacion_id: int
+    score: float
+    ai_score: float
+    final_score: float
+    chunk_text: str
+    entidad: str
+    objeto: str
+    cuantia: float
+    fecha_public: str
+    ubicacion: str
+    modalidad: str
+    ai_explanation: str = ""
 
-    def to_dict(self):
-        d = asdict(self)
-        # Manually convert base_match using its own to_dict to handle numpy arrays
-        if self.base_match:
-             d['base_match'] = self.base_match.to_dict()
-        return d
 
-def _mock_llm_analysis(empresa_nit: str, match: MatchResult) -> Tuple[float, str, bool]:
+def _mock_llm_analysis(nit: str, match: MatchResult) -> Tuple[float, str, bool]:
     """
-    Simulación de llamada a OpenAI. 
-    En producción, aquí envías el prompt con chunk_text y perfil de empresa.
-    Retorna: (ai_score, explanation, cumple_requisitos)
+    Mock LLM analysis - in production, call OpenAI/Gemini.
+    Returns: (ai_score, explanation, cumple_requisitos)
     """
-    # Lógica Dummy para probar el flujo sin gastar tokens reales en dev
-    # Si la cuantía es alta, le damos mejor score :)
-    ai_score = 0.7 
+    ai_score = 0.7
     if match.cuantia > 500_000_000:
         ai_score = 0.9
+    elif match.cuantia > 100_000_000:
+        ai_score = 0.8
     
     explanation = "Análisis IA: El objeto parece compatible con el sector de la empresa."
     return ai_score, explanation, True
 
+
 def obtener_match_augmented(
-    session: Session, 
-    nit_empresa: str, 
+    session: Session,
+    nit_empresa: str,
     fecha_inicio: Optional[date] = None,
-    top_k: int = 10,  # Queremos devolver 10 finales
+    top_k: int = 10,
     min_score_inicial: float = 0.5,
     sector_filter: Optional[List[str]] = None,
     exclusion_filter: Optional[List[str]] = None,
     location_filter: Optional[str] = None,
     rango_cuantia: Optional[Tuple[float, float]] = None
 ) -> List[AugmentedMatchResult]:
+    """
+    Get matches with AI-enhanced scoring (50% vector + 50% AI).
+    """
     
-    # 1. Obtener candidatos del Match Inicial (Hard Filters + Vectores)
-    # Pedimos más candidatos (e.g. 3x top_k) para que el LLM tenga de donde filtrar
+    # Get initial matches
     candidates = obtener_oportunidades_empresa(
         session=session,
         nit_empresa=nit_empresa,
         fecha_inicio=fecha_inicio,
-        top_k=top_k * 3, 
+        top_k=top_k * 3,
         min_score=min_score_inicial,
         sector_filter=sector_filter,
         exclusion_filter=exclusion_filter,
         location_filter=location_filter,
-        rango_cuantia=rango_cuantia,
-        n_clusters=1 # Clustering opcional aquí
+        rango_cuantia=rango_cuantia
     )
     
     if not candidates:
-        LOGGER.info("No hay candidatos iniciales para análisis aumentado.")
+        LOGGER.info("No initial candidates for augmented matching.")
         return []
-
-    results_aug = []
-
-    # 2. Análisis LLM por cada candidato (Costo en tiempo/dinero)
-    # Idealmente usar asyncio.gather para hacerlo en paralelo.
-    for cand in candidates:
-        # LLAMADA A TU SERVICIO LLM
-        # Prompt Idea: "Evalúa si la empresa con objetos X, Y... cumple requisitos Z de licitación..."
-        # Prompt debe manejar Negaciones ("NO fuera de Bogota")
-        
-        ai_score, explanation, cumple = _mock_llm_analysis(nit_empresa, cand)
+    
+    results = []
+    
+    for match in candidates:
+        ai_score, explanation, cumple = _mock_llm_analysis(nit_empresa, match)
         
         if not cumple:
-            # Si el LLM determina que viola una regla dura semántica (ej. "Experiencia en X pero NO en Y")
-            # Lo descartamos o le ponemos score 0
-            continue 
-
-        # 3. Lógica de Scoring 50/50
-        # Normalizar score inicial si viene > 1? Cosine sim max 1.
-        base_score = cand.score
+            continue
         
-        # Formula solicitada por Usuario
-        final_score = (base_score * 0.5) + (ai_score * 0.5)
+        # 50/50 scoring
+        final_score = (match.score * 0.5) + (ai_score * 0.5)
         
-        aug_res = AugmentedMatchResult(
-            base_match=cand,
+        results.append(AugmentedMatchResult(
+            licitacion_id=match.licitacion_id,
+            score=match.score,
             ai_score=ai_score,
             final_score=final_score,
-            ai_explanation=explanation,
-            cumple_requisitos=cumple
-        )
-        results_aug.append(aug_res)
-
-    # 4. Re-ordenar por Final Score
-    results_aug.sort(key=lambda x: x.final_score, reverse=True)
+            chunk_text=match.chunk_text,
+            entidad=match.entidad,
+            objeto=match.objeto,
+            cuantia=match.cuantia,
+            fecha_public=match.fecha_public,
+            ubicacion=match.ubicacion,
+            modalidad=match.modalidad,
+            ai_explanation=explanation
+        ))
     
-    return results_aug[:top_k]
+    # Sort by final score
+    results.sort(key=lambda x: x.final_score, reverse=True)
+    
+    return results[:top_k]

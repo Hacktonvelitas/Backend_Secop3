@@ -1,21 +1,18 @@
-# app/operaciones/precios_IQ.py
+# app/services/operaciones/precios_IQ.py
+"""
+Price analysis service - analyzes market prices for company matches.
+"""
 from __future__ import annotations
 
 import logging
 import sys
 import numpy as np
 from typing import List, Optional, Dict, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
-from sklearn.cluster import KMeans
 
-# Using absolute import to be safe or relative if package refactored
-from app.services.operaciones import match_inicial as match_i
-
-# ============================================================
-# LOGGING
-# ============================================================
 LOGGER = logging.getLogger("precios_iq")
 if not LOGGER.handlers:
     handler = logging.StreamHandler(sys.stdout)
@@ -26,133 +23,102 @@ LOGGER.setLevel("INFO")
 
 @dataclass
 class MarketRangeResult:
+    """Result of market price analysis."""
     nit: str
     total_matches: int
-    used_matches: int
-    num_clusters: int
-    cluster_stats: List[Dict[str, Any]]
-    global_range: Dict[str, float]
+    stats: Dict[str, Any]
+    
+    def to_dict(self):
+        return asdict(self)
 
 
-def _calculate_bounds(values: np.ndarray, alpha: float = 0.05) -> Dict[str, float]:
-    """
-    Calcula media, mediana y rango con significancia alpha.
-    alpha=0.05 => percentiles 5% y 95%.
-    """
+def _calculate_stats(values: np.ndarray, alpha: float = 0.05) -> Dict[str, float]:
+    """Calculate price statistics with percentiles."""
     if values.size == 0:
-        return {"min": 0, "max": 0, "avg": 0, "p05": 0, "p95": 0}
-        
-    p_lower = np.percentile(values, 100 * alpha)
-    p_upper = np.percentile(values, 100 * (1 - alpha))
+        return {"min": 0, "max": 0, "avg": 0, "median": 0, "p05": 0, "p95": 0}
     
     return {
         "min": float(np.min(values)),
         "max": float(np.max(values)),
         "avg": float(np.mean(values)),
         "median": float(np.median(values)),
-        "range_lower": float(p_lower),
-        "range_upper": float(p_upper),
-        "significance": float(alpha)
+        "p05": float(np.percentile(values, 5)),
+        "p95": float(np.percentile(values, 95)),
+        "std": float(np.std(values)),
+        "count": int(values.size)
     }
 
 
 def analizar_precios_empresa(
-    session: Session, 
+    session: Session,
     nit_empresa: str,
     top_k_analysis: int = 100,
-    n_clusters: int = 3,
-    significance_alpha: float = 0.05,
     sector_keywords: Optional[List[str]] = None
 ) -> MarketRangeResult:
     """
-    1. Obtiene matches de la empresa (top_k amplio).
-    2. Agrupa licitaciones similares (KMeans sobre embeddings).
-    3. Calcula estadisticas de precio para cada cluster.
+    Analyze market prices for licitaciones matching a company profile.
     """
     
-    # 1. Traer datos
-    LOGGER.info(f"Analizando precios para NIT={nit_empresa}, buscando {top_k_analysis} matches...")
+    LOGGER.info(f"Analyzing prices for NIT={nit_empresa}")
     
-    # Passing new args to match_inicial
-    matches = match_i.obtener_oportunidades_empresa(
-        session=session,
-        nit_empresa=nit_empresa,
-        top_k=top_k_analysis,
-        min_score=0.45, # Score razonable para análisis de mercado
-        n_clusters=1,    # Ignoramos clustering inicial
-        sector_filter=sector_keywords,
-        # Defaulting other filters to None
-    )
+    # Get company embedding
+    sql_company = text("""
+        SELECT razon_social_embedding 
+        FROM companies 
+        WHERE nit = :nit
+        LIMIT 1
+    """)
     
-    if not matches:
-        return MarketRangeResult(nit_empresa, 0, 0, 0, [], {})
-
-    # 2. Extract Valid Data (Precios > 0)
-    valid_data = []
-    vectors = []
+    row = session.execute(sql_company, {"nit": nit_empresa.strip()}).fetchone()
     
-    for m in matches:
-        # Check nulls for cuantia (it is optional now in schema)
-        if m.cuantia and m.cuantia > 0 and m.vector_licitacion is not None:
-            valid_data.append(m)
-            vectors.append(m.vector_licitacion)
-            
-    if not valid_data:
-        LOGGER.warning("Matches encontrados pero sin cuantía válida o vector.")
-        return MarketRangeResult(nit_empresa, len(matches), 0, 0, [], {})
-
-    X = np.vstack(vectors)
-    X = np.nan_to_num(X) # Safety check
+    if not row or not row[0]:
+        LOGGER.warning(f"Company {nit_empresa} not found or has no embedding")
+        return MarketRangeResult(nit=nit_empresa, total_matches=0, stats={})
     
-    # 3. Clustering
-    # Si hay pocos datos, ajustamos k
-    real_k = min(n_clusters, len(valid_data))
-    if real_k < 2:
-        labels = np.zeros(len(valid_data), dtype=int)
-        real_k = 1
-    else:
-        kmeans = KMeans(n_clusters=real_k, random_state=42, n_init=10)
-        labels = kmeans.fit_predict(X)
-
-    # 4. Stats per Cluster
-    clusters_info = []
-    all_prices = []
-
-    for k in range(real_k):
-        # Indices de este cluster
-        idxs = np.where(labels == k)[0]
-        if len(idxs) == 0: continue
-        
-        cluster_prices = np.array([valid_data[i].cuantia for i in idxs], dtype=float)
-        
-        # Guardamos para global
-        all_prices.extend(cluster_prices)
-        
-        # Stats
-        bounds = _calculate_bounds(cluster_prices, significance_alpha)
-        
-        # Representative text 
-        example_idx = idxs[0]
-        example_obj = valid_data[example_idx].objeto or valid_data[example_idx].best_chunk_text[:100]
-        
-        clusters_info.append({
-            "cluster_id": int(k),
-            "count": int(len(idxs)),
-            "example_topic": example_obj,
-            "stats": bounds
-        })
-
-    # Sort clusters by count desc
-    clusters_info.sort(key=lambda x: x['count'], reverse=True)
-
-    # 5. Global Stats
-    global_bounds = _calculate_bounds(np.array(all_prices, dtype=float), significance_alpha)
-
+    company_embedding = row[0]
+    
+    # Build query with optional sector filter
+    where_extra = ""
+    params = {
+        "company_vec": company_embedding,
+        "limit": top_k_analysis
+    }
+    
+    if sector_keywords:
+        or_conds = []
+        for i, kw in enumerate(sector_keywords):
+            key = f"kw_{i}"
+            or_conds.append(f"(l.act_econ ILIKE :{key} OR l.objeto ILIKE :{key})")
+            params[key] = f"%{kw}%"
+        where_extra = f"AND ({' OR '.join(or_conds)})"
+    
+    sql = text(f"""
+        SELECT DISTINCT ON (l.id)
+            l.id,
+            l.cuantia,
+            1 - (c.embedding_vec <=> CAST(:company_vec AS vector)) AS similarity
+        FROM chunks c
+        JOIN licitacion_keymap k ON k.lic_ext_id = c.lic_id
+        JOIN licitacion l ON l.id = k.licitacion_id
+        WHERE c.embedding_vec IS NOT NULL
+          AND l.cuantia IS NOT NULL
+          AND l.cuantia > 0
+          {where_extra}
+        ORDER BY l.id, similarity DESC
+        LIMIT :limit
+    """)
+    
+    rows = session.execute(sql, params).fetchall()
+    
+    if not rows:
+        return MarketRangeResult(nit=nit_empresa, total_matches=0, stats={})
+    
+    cuantias = np.array([float(r.cuantia) for r in rows], dtype=float)
+    
+    stats = _calculate_stats(cuantias)
+    
     return MarketRangeResult(
         nit=nit_empresa,
-        total_matches=len(matches),
-        used_matches=len(valid_data),
-        num_clusters=real_k,
-        cluster_stats=clusters_info,
-        global_range=global_bounds
+        total_matches=len(rows),
+        stats=stats
     )
