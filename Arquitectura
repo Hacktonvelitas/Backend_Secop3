@@ -1,0 +1,37 @@
+app/
+├── __init__.py
+├── main.py                 # Punto de entrada (solo inicializa FastAPI y monta routers)
+├── core/                   # Configuración central
+│   ├── __init__.py
+│   ├── config.py           # Variables de entorno (pydantic-settings)
+│   ├── security.py         # Lógica de Hash y JWT (lo que vimos antes)
+│   └── database.py         # Conexión a DB (SessionLocal, get_db)
+├── api/                    # Capa de Controladores (Rutas)
+│   ├── __init__.py
+│   ├── deps.py             # Dependencias reutilizables (get_current_user)
+│   └── v1/                 # Versionado de API
+│       ├── __init__.py
+│       ├── router.py       # Router principal que agrupa los demás
+│       └── endpoints/
+│           ├── auth.py         # Login, Register
+│           ├── licitaciones.py # CRUD Licitaciones
+│           ├── pipelines.py    # Ejecución de procesos
+│           └── ai.py           # Rutas de IA
+├── models/                 # Modelos ORM (SQLAlchemy) -> Antes db/schema.py
+│   ├── __init__.py
+│   ├── base.py             # Base declarativa
+│   ├── user.py             # Modelo de Usuario
+│   └── licitacion.py       # Modelos de Licitación y Flags
+├── schemas/                # Modelos Pydantic (DTOs) -> Antes en main.py
+│   ├── __init__.py
+│   ├── user.py             # UserCreate, UserResponse, Token
+│   └── licitacion.py       # LicitacionIn, LicitacionOut
+├── repositories/           # Capa de Acceso a Datos (CRUD puro) -> Antes db/repo.py
+│   ├── __init__.py
+│   ├── base.py             # Clase base genérica (opcional pero recomendada)
+│   ├── user_repo.py        # Lógica de DB para usuarios
+│   └── licitacion_repo.py  # Lógica de DB para licitaciones
+└── services/               # Lógica de Negocio (Orquestación) -> Antes operaciones/
+    ├── __init__.py
+    ├── auth_service.py     # Lógica compleja de auth (si la hubiera)
+    └── pipeline_service.py # Lógica de tus pipelines (match, filtros)
