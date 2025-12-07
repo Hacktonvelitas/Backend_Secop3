@@ -30,7 +30,9 @@ class Base(DeclarativeBase):
     pass
 
 # Tamaño del vector según entorno (default 1536 segun DDL)
-EMBED_DIMS = 1536
+# NOTA: Companies usa 768. PublicLicitacion usa 1536. 
+EMBED_DIMS_OPENAI = 1536
+EMBED_DIMS_LOCAL = 768
 
 # =========================================================================
 # 2. ZONA DE STAGING (INGESTA CRUDA)
@@ -117,8 +119,8 @@ class PublicLicitacion(Base):
     req_cert_9001: Mapped[bool] = mapped_column(Boolean, default=False)
     req_cert_27001: Mapped[bool] = mapped_column(Boolean, default=False)
 
-    # IA
-    objeto_vec: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS))
+    # IA (1536 dims)
+    objeto_vec: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS_OPENAI))
 
     # Relaciones
     criterios: Mapped[List["LicitacionCriterios"]] = relationship(back_populates="licitacion", cascade="all, delete-orphan")
@@ -138,7 +140,7 @@ class LicitacionCriterios(Base):
     tipo_criterio: Mapped[Optional[str]] = mapped_column(String(50))
     puntaje_maximo: Mapped[Optional[int]] = mapped_column(Integer)
     descripcion_regla: Mapped[Optional[str]] = mapped_column(Text)
-    embedding_regla: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS))
+    embedding_regla: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS_OPENAI))
 
     licitacion: Mapped["PublicLicitacion"] = relationship(back_populates="criterios")
 
@@ -153,7 +155,7 @@ class LicitacionObservaciones(Base):
     texto_pregunta: Mapped[Optional[str]] = mapped_column(Text)
     texto_respuesta: Mapped[Optional[str]] = mapped_column(Text)
     cambio_requisito: Mapped[bool] = mapped_column(Boolean, default=False)
-    embedding_contexto: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS))
+    embedding_contexto: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS_OPENAI))
 
     licitacion: Mapped["PublicLicitacion"] = relationship(back_populates="observaciones")
 
@@ -182,7 +184,7 @@ class PublicLicitacionChunk(Base):
     licitacion_id: Mapped[int] = mapped_column(ForeignKey("public.public_licitacion.id"))
     chunk_idx: Mapped[int] = mapped_column(Integer)
     chunk_text: Mapped[Optional[str]] = mapped_column(Text)
-    embedding_vec: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS))
+    embedding_vec: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS_OPENAI))
     metadatos_json: Mapped[Optional[dict]] = mapped_column(JSONB)
 
     documento: Mapped["LicitacionDocumentos"] = relationship(back_populates="chunks")
@@ -193,13 +195,19 @@ class PublicLicitacionChunk(Base):
 # 4. NÚCLEO EMPRESARIAL (PERFIL 360 + IT SPECIALIZATION)
 # =========================================================================
 
-class Empresa(Base):
-    __tablename__ = "empresa"
+# Updated: Empresa -> EmpresaInfo
+class EmpresaInfo(Base):
+    __tablename__ = "empresa_info"
     __table_args__ = {"schema": "public"}
 
     nit: Mapped[str] = mapped_column(String(20), primary_key=True)
     razon_social: Mapped[str] = mapped_column(String(255))
-    sigla: Mapped[Optional[str]] = mapped_column(String(50))
+    
+    # CIIUs
+    ciiu1: Mapped[Optional[str]] = mapped_column(String(255))
+    ciiu2: Mapped[Optional[str]] = mapped_column(String(255))
+    ciiu3: Mapped[Optional[str]] = mapped_column(String(255))
+    ciiu4: Mapped[Optional[str]] = mapped_column(String(255))
 
     # Ubicación y Contacto
     pais: Mapped[Optional[str]] = mapped_column(String(50), default='Colombia')
@@ -212,22 +220,33 @@ class Empresa(Base):
     fecha_constitucion: Mapped[Optional[date]] = mapped_column(Date)
     anios_existencia: Mapped[Optional[int]] = mapped_column(Integer)
     tamano_empresarial: Mapped[Optional[str]] = mapped_column(String(20))
-    es_mipyme_acreditada: Mapped[bool] = mapped_column(Boolean, default=False)
-
-    # Incentivos de Ley
-    tiene_sello_mujer: Mapped[bool] = mapped_column(Boolean, default=False)
-    tiene_pers_discapacidad: Mapped[bool] = mapped_column(Boolean, default=False)
-    es_zomac: Mapped[bool] = mapped_column(Boolean, default=False)
-
-    # IA Profile
-    razon_social_vec: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS))
-
-    # Relaciones
-    activos_ti: Mapped[List["EmpresaActivosTI"]] = relationship(back_populates="empresa", cascade="all, delete-orphan")
-    sanciones: Mapped[List["EmpresaSanciones"]] = relationship(back_populates="empresa", cascade="all, delete-orphan")
+    
+    # Relationships
     documentos: Mapped[List["EmpresaDocumentos"]] = relationship(back_populates="empresa", cascade="all, delete-orphan")
     usuarios: Mapped[List["Usuario"]] = relationship(back_populates="empresa")
     match_runs: Mapped[List["MatchRun"]] = relationship(back_populates="empresa")
+
+
+# NEW: Companies (for vectors?)
+class Companies(Base):
+    __tablename__ = "companies"
+    __table_args__ = {"schema": "public"}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    razon_social: Mapped[Optional[str]] = mapped_column(Text)
+    nit: Mapped[Optional[str]] = mapped_column(Text)
+    muncomercial: Mapped[Optional[str]] = mapped_column(Text)
+    ciiu1: Mapped[Optional[str]] = mapped_column(Text)
+    ciiu2: Mapped[Optional[str]] = mapped_column(Text)
+    ciiu3: Mapped[Optional[str]] = mapped_column(Text)
+    ciiu4: Mapped[Optional[str]] = mapped_column(Text)
+    
+    # Embeddings (768 dims)
+    razon_social_embedding: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS_LOCAL))
+    ciiu1_embedding: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS_LOCAL))
+    ciiu2_embedding: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS_LOCAL))
+    ciiu3_embedding: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS_LOCAL))
+    ciiu4_embedding: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS_LOCAL))
 
 
 class EmpresaDocumentos(Base):
@@ -235,7 +254,8 @@ class EmpresaDocumentos(Base):
     __table_args__ = {"schema": "public"}
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    empresa_nit: Mapped[str] = mapped_column(ForeignKey("public.empresa.nit", ondelete="CASCADE"))
+    # FK references empresa_info.nit 
+    empresa_nit: Mapped[str] = mapped_column(ForeignKey("public.empresa_info.nit", ondelete="CASCADE"))
     nombre_archivo: Mapped[Optional[str]] = mapped_column(String(255))
     tipo_documento: Mapped[Optional[str]] = mapped_column(String(50))
     
@@ -248,65 +268,10 @@ class EmpresaDocumentos(Base):
     procesado_ia: Mapped[bool] = mapped_column(Boolean, default=False)
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    empresa: Mapped["Empresa"] = relationship(back_populates="documentos")
-    chunks: Mapped[List["EmpresaDocumentosChunk"]] = relationship(back_populates="documento", cascade="all, delete-orphan")
+    empresa: Mapped["EmpresaInfo"] = relationship(back_populates="documentos")
 
+# Note: EmpresaDocumentosChunk removed from DDL, removed here too.
 
-class EmpresaDocumentosChunk(Base):
-    __tablename__ = "empresa_documentos_chunk"
-    __table_args__ = (
-        Index("idx_empresa_docs_vec", "embedding_vec", postgresql_using="hnsw", postgresql_with={"m": 16, "ef_construction": 64}),
-        {"schema": "public"}
-    )
-
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    documento_id: Mapped[Optional[int]] = mapped_column(ForeignKey("public.empresa_documentos.id", ondelete="CASCADE"))
-    empresa_nit: Mapped[Optional[str]] = mapped_column(ForeignKey("public.empresa.nit"))
-    
-    chunk_index: Mapped[Optional[int]] = mapped_column(Integer)
-    chunk_text: Mapped[Optional[str]] = mapped_column(Text)
-    embedding_vec: Mapped[Optional[List[float]]] = mapped_column(Vector(EMBED_DIMS))
-    
-    metadatos_json: Mapped[Optional[dict]] = mapped_column(JSONB)
-
-    documento: Mapped["EmpresaDocumentos"] = relationship(back_populates="chunks")
-    # empresa relation optional but good for consistency, though not explicitly back_populated from Empresa unless we add it to Empresa too (which ddl.sql doesn't strictly need relation logic for, but useful in ORM)
-    # DDL has FK but I will not add back_populates to Empresa to keep Empresa clean as per DDL logic primarily.
-
-
-class EmpresaActivosTI(Base):
-    __tablename__ = "empresa_activos_ti"
-    __table_args__ = {"schema": "public"}
-
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    empresa_nit: Mapped[str] = mapped_column(ForeignKey("public.empresa.nit", ondelete="CASCADE"))
-    tipo_activo: Mapped[Optional[str]] = mapped_column(String(50))
-    nombre_activo: Mapped[Optional[str]] = mapped_column(String(255))
-    especificaciones: Mapped[Optional[dict]] = mapped_column(JSONB)
-    cantidad_propia: Mapped[int] = mapped_column(Integer, default=1)
-    es_arrendado: Mapped[bool] = mapped_column(Boolean, default=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-    empresa: Mapped["Empresa"] = relationship(back_populates="activos_ti")
-
-
-class EmpresaSanciones(Base):
-    __tablename__ = "empresa_sanciones"
-    __table_args__ = {"schema": "public"}
-
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    empresa_nit: Mapped[str] = mapped_column(ForeignKey("public.empresa.nit", ondelete="CASCADE"))
-    tipo_sancion: Mapped[Optional[str]] = mapped_column(String(100))
-    entidad_sancionadora: Mapped[Optional[str]] = mapped_column(String(255))
-    fecha_fin: Mapped[Optional[date]] = mapped_column(Date)
-    estado_actual: Mapped[Optional[str]] = mapped_column(String(50))
-
-    empresa: Mapped["Empresa"] = relationship(back_populates="sanciones")
-
-
-# =========================================================================
-# 6. USUARIOS Y SISTEMA DE MATCHING
-# =========================================================================
 
 class Usuario(Base):
     __tablename__ = "usuario"
@@ -316,12 +281,13 @@ class Usuario(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True)
     nombre_completo: Mapped[Optional[str]] = mapped_column(String(255))
     password_hash: Mapped[str] = mapped_column(Text)
-    empresa_nit: Mapped[Optional[str]] = mapped_column(ForeignKey("public.empresa.nit"))
-    rol: Mapped[Optional[str]] = mapped_column(String(50), default='user')
+    # FK references empresa_info
+    empresa_nit: Mapped[Optional[str]] = mapped_column(ForeignKey("public.empresa_info.nit"))
+    # rol removed from DDL
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    empresa: Mapped["Empresa"] = relationship(back_populates="usuarios")
+    empresa: Mapped["EmpresaInfo"] = relationship(back_populates="usuarios")
 
 
 class MatchRun(Base):
@@ -329,12 +295,12 @@ class MatchRun(Base):
     __table_args__ = {"schema": "public"}
 
     run_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    empresa_nit: Mapped[Optional[str]] = mapped_column(ForeignKey("public.empresa.nit"))
+    empresa_nit: Mapped[Optional[str]] = mapped_column(ForeignKey("public.empresa_info.nit"))
     fecha_ejecucion: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     filtros_usados: Mapped[Optional[dict]] = mapped_column(JSONB)
     total_encontrados: Mapped[Optional[int]] = mapped_column(Integer)
 
-    empresa: Mapped["Empresa"] = relationship(back_populates="match_runs")
+    empresa: Mapped["EmpresaInfo"] = relationship(back_populates="match_runs")
     results: Mapped[List["MatchResult"]] = relationship(back_populates="run", cascade="all, delete-orphan")
 
 
@@ -348,16 +314,8 @@ class MatchResult(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     run_id: Mapped[Optional[int]] = mapped_column(ForeignKey("public.match_run.run_id"))
     licitacion_id: Mapped[Optional[int]] = mapped_column(ForeignKey("public.public_licitacion.id"))
-    score_similitud: Mapped[Optional[float]] = mapped_column(Numeric) # Keeping Numeric to match DDL FLOAT but usually SQLAlchemy Float handles python float better. DDL has FLOAT (which is float8). Numeric is DECIMAL. schema.py had Numeric for others. I'll stick to float python type mapping to Numeric or Float column.
-    # DDL: score_similitud FLOAT
-    # SQLAlchemy: Float is best for PostgreSQL FLOAT
-    # However, existing schema used Numeric which is safer for currency. But score is similarity. I'll leave as Numeric if it was working or change to Float?
-    # Original schema.py had Numeric. DDL has FLOAT. I will use Float here to be more accurate to DDL "FLOAT".
-    # Wait, previous schema.py had: score_similitud: Mapped[Optional[float]] = mapped_column(Numeric)
-    # I will change mapped_column(Numeric) to mapped_column(Float) match DDL "FLOAT" better conceptually, but if it breaks something I can revert.
-    # Actually, let's keep it safe. "FLOAT" in PG is double precision.
-    # I will change it to Float.
-
+    
+    score_similitud: Mapped[Optional[float]] = mapped_column(Numeric) # keeping numeric to be safe
     cluster_asignado: Mapped[Optional[int]] = mapped_column(Integer)
     estado_revision: Mapped[Optional[str]] = mapped_column(String(50), default='pendiente')
     comentario_usuario: Mapped[Optional[str]] = mapped_column(Text)

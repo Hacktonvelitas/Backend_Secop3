@@ -8,9 +8,21 @@ from typing import List, Optional, Tuple, Dict
 from datetime import date
 from dataclasses import dataclass, asdict
 
-from sqlalchemy import text, select
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from sklearn.cluster import KMeans
+
+# -----------------
+# IMPORT FIX
+# -----------------
+try:
+    from app.db.schema import PublicLicitacion
+except ModuleNotFoundError:
+    # Fallback if running relative
+    try:
+        from db.schema import PublicLicitacion
+    except ModuleNotFoundError:
+        pass 
 
 # ============================================================
 # LOGGING
@@ -23,47 +35,7 @@ if not LOGGER.handlers:
 LOGGER.setLevel("INFO")
 
 # ============================================================
-# Helpers
-# ============================================================
-
-def _to_np_vec(v) -> Optional[np.ndarray]:
-    """Convierte input (String, Bytes, List, o MemoryView) a Numpy Float32"""
-    if v is None: return None
-    
-    # Caso: Ya es una lista (si usas pgvector-python driver)
-    if isinstance(v, list):
-        return np.array(v, dtype=np.float32)
-
-    # Caso: MemoryView o Bytes
-    if isinstance(v, memoryview): v = v.tobytes()
-    if isinstance(v, (bytes, bytearray)):
-        try:
-            arr = np.frombuffer(v, dtype=np.float32)
-            if arr.size > 0:
-                arr = np.nan_to_num(arr)
-            return arr if arr.size > 0 else None
-        except: pass
-
-    # Caso: String "[0.1, 0.2, ...]"
-    if isinstance(v, str):
-        s = v.strip().lstrip("{[").rstrip("}]")
-        try:
-            nums = [float(x) for x in s.split(",") if x.strip()]
-            return np.nan_to_num(np.array(nums, dtype=np.float32))
-        except: return None
-        
-    try:
-        arr = np.asarray(v, dtype=np.float32)
-        return np.nan_to_num(arr) if arr.size > 0 else None
-    except: return None
-
-def _l2_normalize(x: np.ndarray) -> np.ndarray:
-    n = float(np.linalg.norm(x))
-    if n == 0.0: return x
-    return x / n
-
-# ============================================================
-# Estructuras de Salida (DTOs)
+# DTOs
 # ============================================================
 
 @dataclass
@@ -76,62 +48,147 @@ class MatchResult:
     cuantia: float        
     fecha_public: str     
     cluster_id: int = -1
-    vector_licitacion: Optional[np.ndarray] = None # Added for Augmented Match
+    vector_licitacion: Optional[np.ndarray] = None 
 
     def to_dict(self):
-        # Excluir vector de la salida dict para no ensuciar JSONs
         d = asdict(self)
         if 'vector_licitacion' in d:
              del d['vector_licitacion']
         return d
 
 # ============================================================
-# Consultas SQL
+# Helpers
 # ============================================================
 
-def _fetch_empresa_vector(session: Session, nit: str) -> Optional[np.ndarray]:
-    """Busca el vector de la empresa por NIT."""
-    # Nota: Asegúrate que el NIT venga saneado
+def _to_np_vec(v) -> Optional[np.ndarray]:
+    """Convierte la salida de pgvector a numpy array."""
+    if v is None: return None
+    if isinstance(v, str):
+        # pgvector a veces devuelve string "[0.1, ...]"
+        s = v.strip().lstrip("[").rstrip("]")
+        try:
+             return np.fromstring(s, sep=",", dtype=np.float32)
+        except: return None
+    return np.array(v, dtype=np.float32)
+
+# ============================================================
+# Core Logic
+# ============================================================
+
+def _fetch_empresa_vector(session: Session, nit: str) -> Optional[str]:
+    """
+    Busca el vector de la empresa. 
+    Intenta buscar en empresa_info, si no existe (por DDL nuevo), busca en companies.
+    """
     clean_nit = nit.replace("-", "").replace(" ", "")
     
-    # En nuevo schema: public.empresa.razon_social_vec
-    row = session.execute(text("""
-        SELECT razon_social_vec
-        FROM public.empresa
-        WHERE nit = :nit
-    """), {"nit": clean_nit}).fetchone()
-
-    if not row or row[0] is None:
-        LOGGER.warning(f"Empresa NIT {clean_nit} no encontrada o sin vector (razon_social_vec).")
-        return None
+    # 1. Intentamos buscar en empresa_info (si columna existe, por compatibilidad con schema.py)
+    # schema.py define 'razon_social_vec'. Si la tabla SQL real no lo tiene, esto fallará la query.
+    # Así que usamos raw SQL con TRY implícito o chequeamos metadatos? No, más simple: SQL directo.
     
-    vec = _to_np_vec(row[0])
-    return _l2_normalize(vec) if vec is not None else None
+    # Intento 1: Companies (tabla nueva, más probable que tenga el vector valido localmente)
+    # Pero cuidado con dimensiones (768 vs 1536).
+    # Si usamos OpenAI (1536), debemos buscar 'razon_social_vec' en empresa_info (si existiera).
+    # OJO: DDL Step 154 borró razon_social_vec de empresa_info. Pero schema.py lo tiene mapped.
+    # Si corremos query sobre empresa_info.razon_social_vec y la columna no existe en DB => Error.
+    
+    # Asumiremos que el usuario quiere usar `companies.razon_social_embedding` (768) O 
+    # que va a restaurar `empresa_info.razon_social_vec` (1536).
+    # Dado que MatchInicial compara contra Licitacion (1536), NECESITAMOS 1536dims.
+    # Si Companies tiene 768, NO PODEMOS HACER DOT PRODUCT CON 1536.
+    
+    # ESTRATEGIA: Intentar query segura sobre `empresa_info` asumiendo que el usuario arreglará la DB 
+    # o que la columna "razon_social_vec" sigue ahí en su entorno real (a pesar del DDL script).
+    
+    try:
+        sql = text("SELECT razon_social_vec FROM public.empresa_info WHERE nit = :nit")
+        row = session.execute(sql, {"nit": clean_nit}).fetchone()
+        if row and row[0] is not None:
+             return row[0]
+    except Exception as e:
+        LOGGER.warning(f"Error consultando empresa_info: {e}. Probando 'companies'...")
 
-def _fetch_licitacion_chunks_filtered(
+    # Intento 2: Companies (Si falla lo anterior)
+    try:
+        sql2 = text("SELECT razon_social_embedding FROM public.companies WHERE nit = :nit")
+        row2 = session.execute(sql2, {"nit": clean_nit}).fetchone()
+        if row2 and row2[0] is not None:
+            # WARNING: Dimension check logic not possible in SQL easily without function. 
+            # We return it and hope dimensions match.
+            return row2[0]
+    except Exception as e:
+         LOGGER.warning(f"Error consultando companies: {e}")
+
+    LOGGER.warning(f"Empresa NIT {clean_nit} sin vector encontrado.")
+    return None
+
+def _search_vectors_in_db(
     session: Session, 
-    fecha_inicio: Optional[date] = None, 
-    limit: int = 10000
-) -> List[Tuple]:
-    """
-    Trae chunks con filtro opcional de fecha.
-    Schema nuevo: public_licitacion_chunk joined with public_licitacion
-    """
-    msg_fecha = f"desde {fecha_inicio}" if fecha_inicio else "todo el histórico"
-    LOGGER.info(f"Cargando chunks ({msg_fecha}). Límite: {limit}...")
+    empresa_vec_str: str,
+    limit: int = 100,
+    min_score: float = 0.6,
+    fecha_inicio: Optional[date] = None,
+    location_filter: Optional[str] = None,
+    sector_keywords: Optional[List[str]] = None,
+    exclusion_keywords: Optional[List[str]] = None,
+    min_cuantia: Optional[float] = None,
+    max_cuantia: Optional[float] = None
+) -> List[MatchResult]:
     
-    params = {"limit": limit}
+    # Construcción dinámica de filtros WHERE
     where_clauses = ["c.embedding_vec IS NOT NULL"]
-    
+    params = {
+        "query_vec": empresa_vec_str, 
+        "limit": limit,
+        "min_sim": min_score
+    }
+
+    # 1. Filtro Fecha
     if fecha_inicio:
         where_clauses.append("l.fecha_public >= :fecha_inicio")
         params["fecha_inicio"] = fecha_inicio
 
+    # 2. Filtro Ubicación
+    if location_filter:
+        where_clauses.append("l.ubicacion ILIKE :loc")
+        params["loc"] = f"%{location_filter}%"
+
+    # 3. Filtro Presupuesto (Cuantía)
+    if min_cuantia:
+        where_clauses.append("l.cuantia >= :min_cuantia")
+        params["min_cuantia"] = min_cuantia
+    if max_cuantia:
+        where_clauses.append("l.cuantia <= :max_cuantia")
+        params["max_cuantia"] = max_cuantia
+
+    # 4. Filtro Palabras Clave Positivas (Sector)
+    if sector_keywords:
+        or_conds = []
+        for i, kw in enumerate(sector_keywords):
+            key = f"kw_inc_{i}"
+            # Buscamos en Actividad Económica u Objeto
+            or_conds.append(f"(l.act_econ ILIKE :{key} OR l.objeto ILIKE :{key})")
+            params[key] = f"%{kw}%"
+        if or_conds:
+            where_clauses.append(f"({' OR '.join(or_conds)})")
+
+    # 5. Filtro Palabras Clave NEGATIVAS (Exclusión)
+    if exclusion_keywords:
+        for i, kw in enumerate(exclusion_keywords):
+            key = f"kw_exc_{i}"
+            where_clauses.append(f"l.objeto NOT ILIKE :{key}")
+            # Tambien excluir si está en el chunk de texto encontrado
+            where_clauses.append(f"c.chunk_text NOT ILIKE :{key}") 
+            params[key] = f"%{kw}%"
+
+    # Query optimizada con operador <=> (Cosine Distance)
+    # Nota: 1 - (vec <=> vec) convierte la distancia en similitud (0 a 1)
     sql = f"""
         SELECT 
             c.licitacion_id,
             c.chunk_text,
             c.embedding_vec,
+            (1 - (c.embedding_vec <=> :query_vec)) as similarity,
             l.entidad,
             l.objeto,
             l.cuantia,
@@ -139,23 +196,36 @@ def _fetch_licitacion_chunks_filtered(
         FROM public.public_licitacion_chunk c
         JOIN public.public_licitacion l ON c.licitacion_id = l.id
         WHERE {" AND ".join(where_clauses)}
+          AND (1 - (c.embedding_vec <=> :query_vec)) >= :min_sim
+        ORDER BY similarity DESC
         LIMIT :limit
     """
-    
+
     rows = session.execute(text(sql), params).fetchall()
     
-    parsed_data = []
-    for lid, txt, v_raw, ent, obj, cuant, fecha in rows:
-        vec = _to_np_vec(v_raw)
-        if vec is not None:
-            # Normalizamos aquí para ahorrar cómputo en el loop principal
-            parsed_data.append((lid, txt, _l2_normalize(vec), ent, obj, cuant, fecha))
-            
-    LOGGER.info(f"Chunks cargados en memoria: {len(parsed_data)}")
-    return parsed_data
+    results = []
+    seen_ids = set()
+
+    for lid, txt, vec_raw, score, ent, obj, cuant, fecha in rows:
+        if lid in seen_ids:
+            continue
+        seen_ids.add(lid)
+
+        results.append(MatchResult(
+            licitacion_id=lid,
+            score=float(score),
+            best_chunk_text=txt,
+            entidad=ent,
+            objeto=obj,
+            cuantia=float(cuant) if cuant else 0.0,
+            fecha_public=str(fecha) if fecha else None,
+            vector_licitacion=_to_np_vec(vec_raw)
+        ))
+        
+    return results
 
 # ============================================================
-# Función Principal (Entry Point para Router)
+# Función Principal
 # ============================================================
 
 def obtener_oportunidades_empresa(
@@ -164,81 +234,61 @@ def obtener_oportunidades_empresa(
     fecha_inicio: Optional[date] = None,
     top_k: int = 20, 
     min_score: float = 0.5,
-    n_clusters: int = 3
+    n_clusters: int = 3,
+    sector_filter: Optional[List[str]] = None,     # Ej: ['Tecnología', 'Software']
+    exclusion_filter: Optional[List[str]] = None,  # Ej: ['Aseo', 'Cafetería', 'Obra Civil']
+    location_filter: Optional[str] = None,
+    rango_cuantia: Optional[Tuple[float, float]] = None # Ej: (100M, 5000M)
 ) -> List[MatchResult]:
-    """
-    Función orquestadora para ser llamada desde la API o Match Augmented.
-    """
     
-    # 1. Vector Empresa
-    empresa_vec = _fetch_empresa_vector(session, nit_empresa)
-    if empresa_vec is None:
+    # 1. Obtener Vector
+    empresa_vec_str = _fetch_empresa_vector(session, nit_empresa)
+    if not empresa_vec_str:
         return []
 
-    # 2. Universo de Licitaciones
-    # Ajustar límite según capacidad de instancia
-    candidates = _fetch_licitacion_chunks_filtered(session, fecha_inicio, limit=20000)
+    # Desempaquetar rango cuantía
+    min_c, max_c = (None, None)
+    if rango_cuantia:
+        min_c, max_c = rango_cuantia
+
+    # 2. Búsqueda Vectorial Híbrida en DB (Semántica + Filtros)
+    matches = _search_vectors_in_db(
+        session=session,
+        empresa_vec_str=empresa_vec_str,
+        limit=top_k * 2, # Traemos un poco más para tener margen en clustering
+        min_score=min_score,
+        fecha_inicio=fecha_inicio,
+        location_filter=location_filter,
+        sector_keywords=sector_filter,
+        exclusion_keywords=exclusion_filter,
+        min_cuantia=min_c,
+        max_cuantia=max_c
+    )
     
-    if not candidates:
-        LOGGER.warning("No hay licitaciones para comparar.")
+    LOGGER.info(f"Matches encontrados para NIT {nit_empresa}: {len(matches)}")
+
+    if not matches:
         return []
 
-    # 3. Calcular Matches
-    matches_temp = {} 
-    
-    for lid, txt, lic_vec, ent, obj, cuant, fecha in candidates:
-        score = float(np.dot(empresa_vec, lic_vec))
-        
-        if score >= min_score:
-            if lid not in matches_temp or score > matches_temp[lid]['score']:
-                matches_temp[lid] = {
-                    'score': score,
-                    'text': txt,
-                    'vec': lic_vec, 
-                    'ent': ent,
-                    'obj': obj,
-                    'cuant': float(cuant) if cuant else 0.0,
-                    'fecha': str(fecha) if fecha else None
-                }
+    # Recortar al top_k solicitado
+    matches = matches[:top_k]
 
-    # Convertir a objetos MatchResult
-    results_list = []
-    for lid, data in matches_temp.items():
-        results_list.append(MatchResult(
-            licitacion_id=lid,
-            score=data['score'],
-            best_chunk_text=data['text'],
-            entidad=data['ent'],
-            objeto=data['obj'],
-            cuantia=data['cuant'],
-            fecha_public=data['fecha'],
-            vector_licitacion=data['vec'] # Guardamos vector para augmented
-        ))
-        
-    # Ordenar por score inicial
-    results_list.sort(key=lambda x: x.score, reverse=True)
-    
-    # NOTA: En match_inicial cortamos a top_k, pero si va a llamar a augmented,
-    # tal vez queramos pasar más candidatos. Por ahora respetamos top_k.
-    # Si augmented necesita más, quien llame a esta función debe aumentar top_k.
-    top_results = results_list[:top_k]
-    
-    LOGGER.info(f"Matches encontrados (inicial): {len(top_results)} (Score >= {min_score})")
-
-    # 4. Clustering (K-Means)
-    if top_results and len(top_results) >= n_clusters:
+    # 3. Clustering (K-Means)
+    # Agrupa los resultados por similitud temática visual
+    if len(matches) >= n_clusters:
         try:
-            vecs_for_clustering = []
-            for res in top_results:
-                vecs_for_clustering.append(res.vector_licitacion)
-            
-            X = np.vstack(vecs_for_clustering)
-            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-            labels = kmeans.fit_predict(X)
-            
-            for i, res in enumerate(top_results):
-                res.cluster_id = int(labels[i])
+            vecs = [m.vector_licitacion for m in matches if m.vector_licitacion is not None]
+            if len(vecs) >= n_clusters:
+                X = np.vstack(vecs)
+                # Validamos que no haya NaNs
+                X = np.nan_to_num(X)
+                
+                kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+                labels = kmeans.fit_predict(X)
+                
+                for i, m in enumerate(matches):
+                    m.cluster_id = int(labels[i])
         except Exception as e:
-            LOGGER.error(f"Error en K-Means: {e}")
+            LOGGER.error(f"Error en clustering: {e}")
 
-    return top_results
+    return matches

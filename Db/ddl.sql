@@ -1,4 +1,3 @@
-
 -- 1. EXTENSIONES
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -126,10 +125,14 @@ CREATE TABLE IF NOT EXISTS public_licitacion_chunk (
 -- 4. NÚCLEO EMPRESARIAL (PERFIL 360 + IT SPECIALIZATION)
 -- =========================================================================
 
-CREATE TABLE IF NOT EXISTS empresa (
+CREATE TABLE IF NOT EXISTS empresa_info (
     nit                  VARCHAR(20) PRIMARY KEY,
     razon_social         VARCHAR(255) NOT NULL,
-    sigla                VARCHAR(50),
+    -- CIIUs
+    ciiu1                 VARCHAR(255)
+    ciiu2                 VARCHAR(255)
+    ciiu3                 VARCHAR(255)
+    ciiu4                 VARCHAR(255)
     
     -- Ubicación y Contacto
     pais                 VARCHAR(50) DEFAULT 'Colombia',
@@ -141,16 +144,24 @@ CREATE TABLE IF NOT EXISTS empresa (
     -- Perfil Legal y Tamaño
     fecha_constitucion   DATE,
     anios_existencia     INT,
-    tamano_empresarial   VARCHAR(20),
-    es_mipyme_acreditada BOOLEAN DEFAULT FALSE,
-    
-    -- Incentivos de Ley
-    tiene_sello_mujer        BOOLEAN DEFAULT FALSE,
-    tiene_pers_discapacidad  BOOLEAN DEFAULT FALSE,
-    es_zomac                 BOOLEAN DEFAULT FALSE,
-    
-    -- IA Profile
-    razon_social_vec     vector(1536)
+    tamano_empresarial   VARCHAR(20)
+);
+
+
+CREATE TABLE if NOT EXISTS companies (
+    id SERIAL PRIMARY KEY,
+    razon_social TEXT,
+    nit TEXT,
+    muncomercial TEXT,
+    ciiu1 TEXT,
+    ciiu2 TEXT,
+    ciiu3 TEXT,
+    ciiu4 TEXT,
+    razon_social_embedding vector(768),
+    ciiu1_embedding vector(768),
+    ciiu2_embedding vector(768),
+    ciiu3_embedding vector(768),
+    ciiu4_embedding vector(768)
 );
 -- (He quitado la coma que sobraba después de es_zomac o razon_social_vec dependiendo de tu versión anterior)
 
@@ -172,44 +183,6 @@ CREATE TABLE IF NOT EXISTS empresa_documentos (
     uploaded_at         TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Esta tabla guarda el contenido vectorizado del PDF para búsquedas
-CREATE TABLE IF NOT EXISTS empresa_documentos_chunk (
-    id                  BIGSERIAL PRIMARY KEY,
-    documento_id        BIGINT REFERENCES empresa_documentos(id) ON DELETE CASCADE,
-    empresa_nit         VARCHAR(20) REFERENCES empresa(nit), -- Redundancia útil para filtros rápidos
-    
-    chunk_index         INT,
-    chunk_text          TEXT,          -- El texto extraído del PDF
-    embedding_vec       vector(1536),  -- El vector generado por OpenAI/model
-    
-    metadatos_json      JSONB          -- Ej: { "pagina": 5, "seccion": "Actividades Económicas" }
-);
-
--- Índice para búsquedas rápidas de similitud
-CREATE INDEX IF NOT EXISTS idx_empresa_docs_vec ON empresa_documentos_chunk USING hnsw (embedding_vec vector_cosine_ops);
-
--- 4.4 ACTIVOS DE TI / INFRAESTRUCTURA (NUEVA TABLA)
-CREATE TABLE IF NOT EXISTS empresa_activos_ti (
-    id                  BIGSERIAL PRIMARY KEY,
-    empresa_nit         VARCHAR(20) REFERENCES empresa(nit) ON DELETE CASCADE,
-    tipo_activo         VARCHAR(50), -- 'SERVIDOR', 'LICENCIA_SOFTWARE'
-    nombre_activo       VARCHAR(255), 
-    especificaciones    JSONB,       -- { "ram": "64GB", "cores": 16 }
-    cantidad_propia     INT DEFAULT 1,
-    es_arrendado        BOOLEAN DEFAULT FALSE,
-    updated_at          TIMESTAMPTZ DEFAULT NOW()
-);
-
-
--- 4.7 RIESGOS Y SANCIONES
-CREATE TABLE IF NOT EXISTS empresa_sanciones (
-    id                  BIGSERIAL PRIMARY KEY,
-    empresa_nit         VARCHAR(20) REFERENCES empresa(nit) ON DELETE CASCADE,
-    tipo_sancion        VARCHAR(100), 
-    entidad_sancionadora VARCHAR(255),
-    fecha_fin           DATE,
-    estado_actual       VARCHAR(50)
-);
 
 -- =========================================================================
 -- 6. USUARIOS Y SISTEMA DE MATCHING
@@ -221,10 +194,11 @@ CREATE TABLE IF NOT EXISTS usuario (
     nombre_completo     VARCHAR(255),
     password_hash       TEXT NOT NULL,
     empresa_nit         VARCHAR(20) REFERENCES empresa(nit),
-    rol                 VARCHAR(50) DEFAULT 'user',
     is_active           BOOLEAN DEFAULT TRUE,
     created_at          TIMESTAMPTZ DEFAULT NOW()
 );
+
+
 
 -- Log de ejecuciones del algoritmo de matching
 CREATE TABLE IF NOT EXISTS match_run (

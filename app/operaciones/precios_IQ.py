@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 from sklearn.cluster import KMeans
 
-import operaciones.match_inicial as match_i
+# Using absolute import to be safe or relative if package refactored
+from app.operaciones import match_inicial as match_i
 
 # ============================================================
 # LOGGING
@@ -60,7 +61,8 @@ def analizar_precios_empresa(
     nit_empresa: str,
     top_k_analysis: int = 100,
     n_clusters: int = 3,
-    significance_alpha: float = 0.05
+    significance_alpha: float = 0.05,
+    sector_keywords: Optional[List[str]] = None
 ) -> MarketRangeResult:
     """
     1. Obtiene matches de la empresa (top_k amplio).
@@ -70,12 +72,16 @@ def analizar_precios_empresa(
     
     # 1. Traer datos
     LOGGER.info(f"Analizando precios para NIT={nit_empresa}, buscando {top_k_analysis} matches...")
+    
+    # Passing new args to match_inicial
     matches = match_i.obtener_oportunidades_empresa(
         session=session,
         nit_empresa=nit_empresa,
         top_k=top_k_analysis,
         min_score=0.45, # Score razonable para análisis de mercado
-        n_clusters=1 # Ignoramos el cluster interno de match_inicial, haremos uno propio aqui
+        n_clusters=1,    # Ignoramos clustering inicial
+        sector_filter=sector_keywords,
+        # Defaulting other filters to None
     )
     
     if not matches:
@@ -86,6 +92,7 @@ def analizar_precios_empresa(
     vectors = []
     
     for m in matches:
+        # Check nulls for cuantia (it is optional now in schema)
         if m.cuantia and m.cuantia > 0 and m.vector_licitacion is not None:
             valid_data.append(m)
             vectors.append(m.vector_licitacion)
@@ -95,12 +102,14 @@ def analizar_precios_empresa(
         return MarketRangeResult(nit_empresa, len(matches), 0, 0, [], {})
 
     X = np.vstack(vectors)
+    X = np.nan_to_num(X) # Safety check
     
     # 3. Clustering
     # Si hay pocos datos, ajustamos k
     real_k = min(n_clusters, len(valid_data))
     if real_k < 2:
         labels = np.zeros(len(valid_data), dtype=int)
+        real_k = 1
     else:
         kmeans = KMeans(n_clusters=real_k, random_state=42, n_init=10)
         labels = kmeans.fit_predict(X)
@@ -112,6 +121,8 @@ def analizar_precios_empresa(
     for k in range(real_k):
         # Indices de este cluster
         idxs = np.where(labels == k)[0]
+        if len(idxs) == 0: continue
+        
         cluster_prices = np.array([valid_data[i].cuantia for i in idxs], dtype=float)
         
         # Guardamos para global
@@ -120,7 +131,7 @@ def analizar_precios_empresa(
         # Stats
         bounds = _calculate_bounds(cluster_prices, significance_alpha)
         
-        # Representative text (centroid-ish logic or just random sample)
+        # Representative text 
         example_idx = idxs[0]
         example_obj = valid_data[example_idx].objeto or valid_data[example_idx].best_chunk_text[:100]
         
