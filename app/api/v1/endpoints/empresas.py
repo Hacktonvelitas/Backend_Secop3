@@ -20,21 +20,19 @@ def read_empresas(
     # If not, I'll implement a basic list here.
     return repo.session.query(repo.model).offset(skip).limit(limit).all()
 
+from app.services.empresa_service import EmpresaService
+
 @router.post("/", response_model=EmpresaOut)
 def create_empresa(
     empresa_in: EmpresaCreate,
     db: Session = Depends(get_db)
 ):
-    repo = EmpresaRepository(db)
-    # Check if exists
-    existing = repo.get_by_nit(empresa_in.nit)
-    if existing:
-        raise HTTPException(status_code=400, detail="Empresa with this NIT already exists")
-    
-    empresa = repo.create(empresa_in)
-    db.commit()
-    db.refresh(empresa)
-    return empresa
+    service = EmpresaService(db)
+    try:
+        return service.create_empresa(empresa_in)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 
 @router.get("/{nit}", response_model=EmpresaOut)
 def read_empresa(

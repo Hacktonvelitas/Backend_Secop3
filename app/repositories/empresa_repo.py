@@ -29,3 +29,14 @@ class EmpresaRepository:
     def get_vector_data(self, nit: str) -> Optional[Companies]:
         stmt = select(Companies).where(Companies.nit == nit)
         return self.session.execute(stmt).scalars().first()
+
+    def create_company_vector(self, nit: str, razon_social: str, embedding: List[float]) -> Companies:
+        company = Companies(
+            nit=nit,
+            razon_social=razon_social,
+            razon_social_embedding=embedding
+        )
+        self.session.add(company)
+        self.session.flush()
+        return company
+
