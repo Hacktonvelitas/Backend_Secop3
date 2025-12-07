@@ -4,7 +4,7 @@ import sys
 
 # Configuration
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000/api/v1/opportunities")
-NIT = "9004300063"  # VERAGRO SAS
+NIT = "901000000"  # CONSTRUCTORA Y CONSULTORA DE OBRAS CIVILES SAS
 
 def test_endpoint(name, url):
     print(f"\n--- Testing {name} ---")
@@ -32,11 +32,12 @@ if __name__ == "__main__":
     test_endpoint("Company Info", f"{BASE_URL}/{NIT}/company")
 
     # 1. Match Inicial
-    test_endpoint("Match Inicial", f"{BASE_URL}/{NIT}/match?top_k=3")
+    test_endpoint("Match Inicial", f"{BASE_URL}/{NIT}/match?top_k=3&min_score=0.0")
 
     # 2. Match Augmented
-    test_endpoint("Match Augmented", f"{BASE_URL}/{NIT}/match-ai?top_k=3")
+    test_endpoint("Match Augmented", f"{BASE_URL}/{NIT}/match-ai?top_k=3&min_score=0.0")
+
 
     # 3. Market Analysis
-    test_endpoint("Analisis Precios", f"{BASE_URL}/{NIT}/market-analysis?top_k_analysis=50")
+    test_endpoint("Analisis Precios", f"{BASE_URL}/{NIT}/market-analysis?top_k_analysis=50&sector_keywords=Obra,Civil,Vias")
 

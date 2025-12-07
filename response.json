@@ -1,0 +1,53 @@
+[
+  {
+    "razon_social": "Empresa de Prueba SAS",
+    "ciiu1": null,
+    "ciiu2": null,
+    "ciiu3": null,
+    "ciiu4": null,
+    "pais": "Colombia",
+    "departamento": null,
+    "municipio": "Bogot\u00e1",
+    "direccion_legal": null,
+    "correo_contacto": "contacto@prueba.com",
+    "fecha_constitucion": null,
+    "anios_existencia": null,
+    "tamano_empresarial": null,
+    "nit": "900123456",
+    "documentos": []
+  },
+  {
+    "razon_social": "string",
+    "ciiu1": "string",
+    "ciiu2": "string",
+    "ciiu3": "string",
+    "ciiu4": "string",
+    "pais": "string",
+    "departamento": "string",
+    "municipio": "string",
+    "direccion_legal": "string",
+    "correo_contacto": "string",
+    "fecha_constitucion": "2025-12-07",
+    "anios_existencia": 11,
+    "tamano_empresarial": "string",
+    "nit": "1234567",
+    "documentos": []
+  },
+  {
+    "razon_social": "CONSTRUCTORA Y CONSULTORA DE OBRAS CIVILES SAS",
+    "ciiu1": null,
+    "ciiu2": null,
+    "ciiu3": null,
+    "ciiu4": null,
+    "pais": "Colombia",
+    "departamento": null,
+    "municipio": "Bogota",
+    "direccion_legal": "Av. El Dorado # 123",
+    "correo_contacto": "contacto@constructora-test.com",
+    "fecha_constitucion": null,
+    "anios_existencia": null,
+    "tamano_empresarial": null,
+    "nit": "901000000",
+    "documentos": []
+  }
+]
