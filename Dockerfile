@@ -11,6 +11,10 @@ RUN python -m pip install -U pip && pip install --no-cache-dir -r requirements.t
 # Copia la carpeta app dentro de /app/app
 COPY app ./app
 
+# Create a non-root user and switch to it
+RUN addgroup --system appgroup && adduser --system --group appuser
+USER appuser
+
 EXPOSE 8000
 ENV UVICORN_WORKERS=2 PORT=8000 PYTHONPATH=/app
 
