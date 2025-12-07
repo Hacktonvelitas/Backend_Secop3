@@ -9,12 +9,20 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
-from db.deps import get_db
-from db import repo
-from operaciones.pipeline import get_available_flows, run_flow_for_one, run_flow_batch
-
-# Import Opportunites Router
-from opp_router import router as opp_router
+# Updated imports to be relative or app-prefixed if possible, 
+# but "db.deps" implies running inside app folder or with PYTHONPATH setup.
+# I will use "app.db.deps" to be robust if run from root.
+try:
+    from app.db.deps import get_db
+    from app.db import repo
+    from app.operaciones.pipeline import get_available_flows, run_flow_for_one, run_flow_batch
+    from app.opp_router import router as opp_router
+except ModuleNotFoundError:
+    # Fallback to local import if running inside app directory
+    from db.deps import get_db
+    from db import repo
+    from operaciones.pipeline import get_available_flows, run_flow_for_one, run_flow_batch
+    from opp_router import router as opp_router
 
 api = FastAPI(title="Licita API", version="1.0.0")
 
@@ -56,7 +64,8 @@ class LicitacionIn(BaseModel):
     objeto: Optional[str] = None
     cuantia: Optional[float] = None
     modalidad: Optional[str] = None
-    numero: Optional[str] = None
+    # Changed numero to codigo_proceso to match schema/repo
+    codigo_proceso: Optional[str] = None
     fecha_public: Optional[date] = None
 
 
@@ -64,6 +73,7 @@ class LicitacionIn(BaseModel):
 
 @api.post("/licitaciones", response_model=dict)
 def create(lic_in: LicitacionIn, db: Session = Depends(get_db)):
+    # repo.create_licitacion updated to match args
     lic = repo.create_licitacion(db, **lic_in.model_dump())
     db.commit()
     return {"id": lic.id}

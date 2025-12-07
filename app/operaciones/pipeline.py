@@ -5,34 +5,24 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 # Importamos los nuevos modulos de matching
-import operaciones.match_inicial as match_i
-import operaciones.match_augmented as match_a
+import app.operaciones.match_inicial as match_i
+import app.operaciones.match_augmented as match_a
 
-# Mantenemos imports legacy si están disponibles, sino ignora
-try:
-    from .precios_IQ import run_flag_precio_for_one as _run_precio_one
-    HAS_PRECIO = True
-except Exception:
-    HAS_PRECIO = False
+# Precios IQ (Legacy flag check removed, new logic is company-centric)
+# We won't import the old function since it doesn't exist.
+HAS_PRECIO = False
 
 
 def get_computable_flows() -> List[str]:
     """
-    Flujos disponibles. Flags legacy pueden seguir o quitarse.
-    Agregamos 'match_augmented' como un flujo ejecutable si se desea.
+    Flujos disponibles.
     """
     base: List[str] = []
-    if HAS_PRECIO:
-        base.append("red_precio")
-    
-    # Podemos agregar 'match_checker' si quisieras correr validaciones, 
-    # pero match es generalmente "Company -> Licitaciones", no "Licitacion -> Check".
-    # El pipeline original estaba diseñado para "Valida esta Licitacion".
-    # Por ahora lo dejamos simple.
+    # if HAS_PRECIO: base.append("red_precio")
     return base
 
 def get_interactive_flows() -> List[str]:
-    return ["red_contactos", "match_augmented"]
+    return ["match_augmented"]
 
 def get_available_flows() -> List[str]:
     return get_computable_flows() + get_interactive_flows() + ["all"]
@@ -42,50 +32,41 @@ def _run_one_flow(db: Session, lic_id: int, flow: str, json_override: Optional[d
     
     # Match Augmented via pipeline
     if flow == "match_augmented":
-        # Este flujo es "raro" para una licitación individual, 
-        # porque match_augmented es "Empresa -> Lista de Lics".
-        # Si se corre para UNA licitación, ¿qué significa?
-        # ¿"Esta licitación hace match con la empresa X"?
-        # Asumiremos que el payload trae 'nit_empresa' y validamos si esta lic_id sale en el top.
+        # Estrategia: "Check if this Lic ID matches specific Company"
+        # Requires 'nit_empresa' in json_override
         
         nit = json_override.get('nit_empresa') if json_override else None
         if not nit:
             return {"flow": "match_augmented", "ok": False, "error": "nit_empresa required in json_override"}
         
-        # Corremos match augmented
-        results = match_a.obtener_match_augmented(db, nit_empresa=nit)
+        # Corremos match augmented (Top K)
+        # Note: This is expensive if we just want to check ONE licitacion. 
+        # But our current logic is "Get Top K for Company". 
+        # Ideally we should have "Score Pair (Company, Lic)" function.
+        # We will use the existing function and check if ID is present.
         
-        # Verificamos si lic_id esta en results
-        match_data = next((r for r in results if r['licitacion_id'] == lic_id), None)
+        results = match_a.obtener_match_augmented(db, nit_empresa=nit, top_k=50)
         
+        # results is List[AugmentedMatchResult]
+        # Check if lic_id is in the results
+        match_obj = next((r for r in results if r.base_match.licitacion_id == lic_id), None)
+        
+        if match_obj:
+            data_dict = {
+                "licitacion_id": match_obj.base_match.licitacion_id,
+                "final_score": match_obj.final_score,
+                "ai_explanation": match_obj.ai_explanation,
+                "cumple_requisitos": match_obj.cumple_requisitos
+            }
+        else:
+            data_dict = None
+
         return {
             "flow": "match_augmented",
             "result": {
-                "matched": bool(match_data),
-                "data": match_data
+                "matched": bool(match_obj),
+                "data": data_dict
             }
-        }
-
-    # Computables Legacy:
-    if flow == "red_precio" and HAS_PRECIO:
-        res = _run_precio_one(db, lic_id)
-        return {
-            "flow": "red_precio",
-            "result": {
-                "ok": True,
-                "flag_applied": (res.target_cuantia is not None) and (
-                    res.target_cuantia < res.stats.lower
-                    or res.target_cuantia > res.stats.upper
-                    or abs(res.stats.z_mad) >= 2.8
-                ),
-                "detail": {
-                    "method": res.method,
-                    "n_comparables": res.n_comparables,
-                    "median": res.stats.median,
-                    "z_mad": res.stats.z_mad,
-                    "neighbors": res.neighbor_ids,
-                },
-            },
         }
 
     return {"flow": flow, "status": "skipped_or_unknown"}
@@ -98,7 +79,8 @@ def run_flow_for_one(
     json_override: Optional[dict] = None,
 ) -> dict:
     if flow == "all":
-        flows = get_computable_flows()
+        flows = get_interactive_flows() # Only run interactive ones if requested implicitly? Usually 'all' runs computables.
+        # But we have no computables now.
     else:
         flows = [flow]
 
@@ -118,9 +100,7 @@ def run_flow_batch(
     json_override: Optional[dict] = None,
 ) -> List[dict]:
     
-    # Cursor de IDs si no vienen dados (solo para computables)
     if lic_ids is None:
-        # Ajuste para nuevo schema: tabla public_licitacion
         sql = "SELECT id FROM public.public_licitacion"
         if where_clause:
             sql += f" WHERE {where_clause}"

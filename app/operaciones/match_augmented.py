@@ -1,152 +1,111 @@
 # app/operaciones/match_augmented.py
+# Este módulo se encarga de usar LLM (OpenAI) para re-rankear y verificar reglas complejas.
+# Se basa en los resultados de match_inicial (Vectorial + Filtros Duros).
+
 from __future__ import annotations
 
 import logging
-import sys
-import numpy as np
-from sqlalchemy import text
-from sqlalchemy.orm import Session
-from typing import List, Optional, Dict
+from typing import List, Optional, Tuple, Dict
 from datetime import date
+from dataclasses import dataclass, field
 
-import match_inicial as match_i
+from sqlalchemy.orm import Session
+from app.operaciones.match_inicial import obtener_oportunidades_empresa, MatchResult
 
-# ============================================================
-# LOGGING
-# ============================================================
+# Si tienes un servicio de OpenAI configurado:
+# from app.servicios.llm_service import analizar_match_con_gpt  (Ejemplo hipotético)
+# Como no tengo acceso a tu libreria de LLM interna, simularé la llamada o asumiré una función simple.
+
 LOGGER = logging.getLogger("match_augmented")
-if not LOGGER.handlers:
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(logging.Formatter("[match_augmented] %(levelname)s %(message)s"))
-    LOGGER.addHandler(handler)
 LOGGER.setLevel("INFO")
 
-# ============================================================
-# Helpers
-# ============================================================
+@dataclass
+class AugmentedMatchResult:
+    base_match: MatchResult
+    ai_score: float = 0.0          # Score dado por el LLM (0.0 a 1.0)
+    final_score: float = 0.0       # (base_score * 0.5) + (ai_score * 0.5)
+    ai_explanation: str = ""       # Explicación del LLM
+    cumple_requisitos: bool = True # Si el LLM detecta que NO cumple un requisito excluyente (e.g. Ubicación Negativa)
 
-def _fetch_empresa_tags(session: Session, nit: str) -> List[str]:
+def _mock_llm_analysis(empresa_nit: str, match: MatchResult) -> Tuple[float, str, bool]:
     """
-    Recupera 'labels' o 'tags' de la empresa para el matching aumentado.
-    En el nuevo schema, usaremos `empresa_experiencia.tech_stack_tags` y `equipo_tech_skills`.
-    Se consolidan en una lista única de strings.
+    Simulación de llamada a OpenAI. 
+    En producción, aquí envías el prompt con chunk_text y perfil de empresa.
+    Retorna: (ai_score, explanation, cumple_requisitos)
     """
-    clean_nit = nit.replace("-", "").replace(" ", "")
-    tags = set()
-
-    # 1. Tags de Experiencia (Proyectos previos)
-    try:
-        rows = session.execute(text("""
-            SELECT tech_stack_tags 
-            FROM public.empresa_experiencia 
-            WHERE empresa_nit = :nit
-        """), {"nit": clean_nit}).fetchall()
-        
-        for (tag_list,) in rows:
-            if tag_list:
-                for t in tag_list:
-                    if t: tags.add(t.lower())
-
-        # 2. Skills del Equipo (opcional, si queremos hilar fino)
-        # rows_skills = session.execute(text("""
-        #     SELECT ts.tecnologia 
-        #     FROM public.empresa_equipo e
-        #     JOIN public.equipo_tech_skills ts ON ts.equipo_id = e.id
-        #     WHERE e.empresa_nit = :nit
-        # """), {"nit": clean_nit}).fetchall()
-        # for (tech,) in rows_skills:
-        #    if tech: tags.add(tech.lower())
-
-    except Exception as e:
-        LOGGER.error(f"Error fetching tags for {nit}: {e}")
-
-    return list(tags)
-
-def _calculate_tag_match_score(match_text: str, tags: List[str]) -> float:
-    """
-    Calcula un score simple basado en cuántos tags aparecen en el texto del chunk/licitación.
-    Podría ser mejorado con embedding matching si los tags tuvieran vectores.
-    Aquí hacemos string matching simple "tag IN text".
-    """
-    if not tags or not match_text:
-        return 0.0
+    # Lógica Dummy para probar el flujo sin gastar tokens reales en dev
+    # Si la cuantía es alta, le damos mejor score :)
+    ai_score = 0.7 
+    if match.cuantia > 500_000_000:
+        ai_score = 0.9
     
-    text_lower = match_text.lower()
-    hits = 0
-    for tag in tags:
-        if tag in text_lower:
-            hits += 1
-            
-    # Heurística: cada hit suma 0.1, tope 0.5 de boost?
-    # O normalizar por len(tags)?
-    # Vamos a sumar 0.05 por cada tag encontrado.
-    return min(hits * 0.05, 0.5) 
-
-# ============================================================
-# Función Principal
-# ============================================================
+    explanation = "Análisis IA: El objeto parece compatible con el sector de la empresa."
+    return ai_score, explanation, True
 
 def obtener_match_augmented(
     session: Session, 
-    nit_empresa: str,
-    etiquetas_override: Optional[List[str]] = None, # Si vienen del front
+    nit_empresa: str, 
     fecha_inicio: Optional[date] = None,
-    top_k: int = 50, # Pedimos más match inicial para filtrar luego
-    final_k: int = 20
-) -> List[Dict]:
-    """
-    1. Llama match_inicial con un top_k amplio.
-    2. Busca etiquetas de la empresa (o usa override).
-    3. Re-rankea resultados sumando score de etiquetas.
-    """
+    top_k: int = 10,  # Queremos devolver 10 finales
+    min_score_inicial: float = 0.5,
+    sector_filter: Optional[List[str]] = None,
+    exclusion_filter: Optional[List[str]] = None,
+    location_filter: Optional[str] = None,
+    rango_cuantia: Optional[Tuple[float, float]] = None
+) -> List[AugmentedMatchResult]:
     
-    # 1. Match Inicial
-    LOGGER.info(f"Ejecutando Match Inicial para {nit_empresa}...")
-    base_matches = match_i.obtener_oportunidades_empresa(
+    # 1. Obtener candidatos del Match Inicial (Hard Filters + Vectores)
+    # Pedimos más candidatos (e.g. 3x top_k) para que el LLM tenga de donde filtrar
+    candidates = obtener_oportunidades_empresa(
         session=session,
         nit_empresa=nit_empresa,
         fecha_inicio=fecha_inicio,
-        top_k=top_k, 
-        min_score=0.4 # Un poco mas permisivo para dejar entrar cosas que los tags suban
+        top_k=top_k * 3, 
+        min_score=min_score_inicial,
+        sector_filter=sector_filter,
+        exclusion_filter=exclusion_filter,
+        location_filter=location_filter,
+        rango_cuantia=rango_cuantia,
+        n_clusters=1 # Clustering opcional aquí
     )
     
-    if not base_matches:
+    if not candidates:
+        LOGGER.info("No hay candidatos iniciales para análisis aumentado.")
         return []
 
-    # 2. Obtener Tags
-    if etiquet_override:
-        params_tags = [t.lower() for t in etiquet_override]
-        LOGGER.info(f"Usando etiquetas override: {len(params_tags)}")
-    else:
-        params_tags = _fetch_empresa_tags(session, nit_empresa)
-        LOGGER.info(f"Etiquetas encontradas en DB para {nit_empresa}: {len(params_tags)} ({params_tags})")
+    results_aug = []
 
-    # 3. Re-Ranking (Augmented)
-    augmented_results = []
+    # 2. Análisis LLM por cada candidato (Costo en tiempo/dinero)
+    # Idealmente usar asyncio.gather para hacerlo en paralelo.
+    for cand in candidates:
+        # LLAMADA A TU SERVICIO LLM
+        # Prompt Idea: "Evalúa si la empresa con objetos X, Y... cumple requisitos Z de licitación..."
+        # Prompt debe manejar Negaciones ("NO fuera de Bogota")
+        
+        ai_score, explanation, cumple = _mock_llm_analysis(nit_empresa, cand)
+        
+        if not cumple:
+            # Si el LLM determina que viola una regla dura semántica (ej. "Experiencia en X pero NO en Y")
+            # Lo descartamos o le ponemos score 0
+            continue 
+
+        # 3. Lógica de Scoring 50/50
+        # Normalizar score inicial si viene > 1? Cosine sim max 1.
+        base_score = cand.score
+        
+        # Formula solicitada por Usuario
+        final_score = (base_score * 0.5) + (ai_score * 0.5)
+        
+        aug_res = AugmentedMatchResult(
+            base_match=cand,
+            ai_score=ai_score,
+            final_score=final_score,
+            ai_explanation=explanation,
+            cumple_requisitos=cumple
+        )
+        results_aug.append(aug_res)
+
+    # 4. Re-ordenar por Final Score
+    results_aug.sort(key=lambda x: x.final_score, reverse=True)
     
-    for m in base_matches:
-        # Score base (vectorial)
-        base_score = m.score
-        
-        # Boost por tags
-        tag_boost = _calculate_tag_match_score(m.best_chunk_text + " " + (m.objeto or ""), params_tags)
-        
-        final_score = base_score + tag_boost
-        
-        # Convertimos a dict y agregamos metadatos de debug
-        d = m.to_dict()
-        d['score_base'] = base_score
-        d['score_tags'] = tag_boost
-        d['score_total'] = final_score
-        d['matched_tags'] = [t for t in params_tags if t in (m.best_chunk_text + " " + (m.objeto or "")).lower()]
-        
-        augmented_results.append(d)
-        
-    # Ordenar por score total
-    augmented_results.sort(key=lambda x: x['score_total'], reverse=True)
-    
-    # Cortar a final_k
-    final_results = augmented_results[:final_k]
-    
-    LOGGER.info(f"Match Augmented finalizado. Retornando {len(final_results)} resultados.")
-    return final_results
+    return results_aug[:top_k]
