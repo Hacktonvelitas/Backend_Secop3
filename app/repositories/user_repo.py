@@ -19,7 +19,7 @@ class UserRepository:
             nombre_completo=user_in.nombre_completo,
             password_hash=hash_password(user_in.password),
             empresa_nit=user_in.empresa_nit,
-            rol=user_in.rol,
+
             is_active=user_in.is_active
         )
         self.session.add(db_obj)

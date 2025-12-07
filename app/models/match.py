@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import List, Optional
 from datetime import datetime
 from sqlalchemy import (
-    ForeignKey, Integer, BigInteger, Numeric, String, Text, UniqueConstraint
+    ForeignKey, Integer, BigInteger, Numeric, String, Text, UniqueConstraint, DateTime
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship

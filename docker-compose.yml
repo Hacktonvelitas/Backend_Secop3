@@ -7,6 +7,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_HOST_AUTH_METHOD: trust
       TZ: America/Bogota
     command:
       - "postgres"
@@ -22,7 +23,7 @@ services:
       - "checkpoint_completion_target=0.9"
       - "-c"
       - "wal_buffers=16MB"
-      - "${POSTGRES_PORT}:5432"
+
     volumes:
       - db_data:/var/lib/postgresql/data
       - ./init-db.sh:/docker-entrypoint-initdb.d/01-init-db.sh:ro
@@ -116,7 +117,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
       TZ: America/Bogota
       S3_ENDPOINT: http://minio:9000
       S3_ACCESS_KEY: ${S3_ACCESS_KEY}
@@ -124,6 +125,8 @@ services:
       S3_BUCKET: ${S3_BUCKET}
     ports:
       - "${APP_PORT}:8000"
+    volumes:
+      - .:/app
     restart: unless-stopped
     networks: [ backend ]
 

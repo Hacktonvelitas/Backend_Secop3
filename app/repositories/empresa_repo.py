@@ -7,6 +7,7 @@ from app.schemas.empresa import EmpresaCreate, EmpresaUpdate
 class EmpresaRepository:
     def __init__(self, session: Session):
         self.session = session
+        self.model = EmpresaInfo
 
     def get_by_nit(self, nit: str) -> Optional[EmpresaInfo]:
         return self.session.get(EmpresaInfo, nit)

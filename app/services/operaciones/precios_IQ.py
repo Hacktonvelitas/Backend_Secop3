@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from sklearn.cluster import KMeans
 
 # Using absolute import to be safe or relative if package refactored
-from app.operaciones import match_inicial as match_i
+from app.services.operaciones import match_inicial as match_i
 
 # ============================================================
 # LOGGING

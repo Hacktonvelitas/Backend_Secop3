@@ -9,11 +9,18 @@ from datetime import date
 from dataclasses import dataclass, asdict
 
 from sqlalchemy import text
+from sqlalchemy.orm import Session
+import os
+import traceback
+
+LOGGER = logging.getLogger("match_empresa")
 if not LOGGER.handlers:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(logging.Formatter("[match_empresa] %(levelname)s %(message)s"))
     LOGGER.addHandler(handler)
 LOGGER.setLevel("INFO")
+# Configuration flag for optional LLM fallback when DB returns no matches
+USE_LLM_FALLBACK = os.getenv('USE_LLM_FALLBACK', 'true').lower() == 'true'
 
 # ============================================================
 # DTOs
@@ -57,49 +64,28 @@ def _to_np_vec(v) -> Optional[np.ndarray]:
 # ============================================================
 
 def _fetch_empresa_vector(session: Session, nit: str) -> Optional[str]:
+    """Fetch the company's vector using a fresh DB connection to avoid transaction issues.
+    Tries empresa_info first, then companies.
     """
-    Busca el vector de la empresa. 
-    Intenta buscar en empresa_info, si no existe (por DDL nuevo), busca en companies.
-    """
+    from sqlalchemy import create_engine, text
+    import os
     clean_nit = nit.replace("-", "").replace(" ", "")
-    
-    # 1. Intentamos buscar en empresa_info (si columna existe, por compatibilidad con schema.py)
-    # schema.py define 'razon_social_vec'. Si la tabla SQL real no lo tiene, esto fallará la query.
-    # Así que usamos raw SQL con TRY implícito o chequeamos metadatos? No, más simple: SQL directo.
-    
-    # Intento 1: Companies (tabla nueva, más probable que tenga el vector valido localmente)
-    # Pero cuidado con dimensiones (768 vs 1536).
-    # Si usamos OpenAI (1536), debemos buscar 'razon_social_vec' en empresa_info (si existiera).
-    # OJO: DDL Step 154 borró razon_social_vec de empresa_info. Pero schema.py lo tiene mapped.
-    # Si corremos query sobre empresa_info.razon_social_vec y la columna no existe en DB => Error.
-    
-    # Asumiremos que el usuario quiere usar `companies.razon_social_embedding` (768) O 
-    # que va a restaurar `empresa_info.razon_social_vec` (1536).
-    # Dado que MatchInicial compara contra Licitacion (1536), NECESITAMOS 1536dims.
-    # Si Companies tiene 768, NO PODEMOS HACER DOT PRODUCT CON 1536.
-    
-    # ESTRATEGIA: Intentar query segura sobre `empresa_info` asumiendo que el usuario arreglará la DB 
-    # o que la columna "razon_social_vec" sigue ahí en su entorno real (a pesar del DDL script).
-    
-    try:
-        sql = text("SELECT razon_social_vec FROM public.empresa_info WHERE nit = :nit")
-        row = session.execute(sql, {"nit": clean_nit}).fetchone()
-        if row and row[0] is not None:
-             return row[0]
-    except Exception as e:
-        LOGGER.warning(f"Error consultando empresa_info: {e}. Probando 'companies'...")
-
-    # Intento 2: Companies (Si falla lo anterior)
-    try:
-        sql2 = text("SELECT razon_social_embedding FROM public.companies WHERE nit = :nit")
-        row2 = session.execute(sql2, {"nit": clean_nit}).fetchone()
-        if row2 and row2[0] is not None:
-            # WARNING: Dimension check logic not possible in SQL easily without function. 
-            # We return it and hope dimensions match.
-            return row2[0]
-    except Exception as e:
-         LOGGER.warning(f"Error consultando companies: {e}")
-
+    engine = create_engine(os.getenv('DATABASE_URL'))
+    with engine.connect() as conn:
+        # Try empresa_info
+        try:
+            row = conn.execute(text("SELECT razon_social_vec FROM public.empresa_info WHERE nit = :nit"), {"nit": clean_nit}).fetchone()
+            if row and row[0] is not None:
+                return row[0]
+        except Exception as e:
+            LOGGER.warning(f"Error consulting empresa_info: {e}. Trying companies...")
+        # Try companies
+        try:
+            row2 = conn.execute(text("SELECT razon_social_embedding FROM public.companies WHERE nit = :nit"), {"nit": clean_nit}).fetchone()
+            if row2 and row2[0] is not None:
+                return row2[0]
+        except Exception as e:
+            LOGGER.warning(f"Error consulting companies: {e}")
     LOGGER.warning(f"Empresa NIT {clean_nit} sin vector encontrado.")
     return None
 
@@ -166,23 +152,27 @@ def _search_vectors_in_db(
     # Nota: 1 - (vec <=> vec) convierte la distancia en similitud (0 a 1)
     sql = f"""
         SELECT 
-            c.licitacion_id,
-            c.chunk_text,
+            c.lic_id as licitacion_id,
+            c.text as chunk_text,
             c.embedding_vec,
-            (1 - (c.embedding_vec <=> :query_vec)) as similarity,
+            (1 - (c.embedding_vec <-> (:query_vec)::vector)) as similarity,
             l.entidad,
             l.objeto,
             l.cuantia,
             l.fecha_public
-        FROM public.public_licitacion_chunk c
-        JOIN public.public_licitacion l ON c.licitacion_id = l.id
+        FROM public.chunks c
+        JOIN public.licitacion l ON c.lic_id::int = l.id
         WHERE {" AND ".join(where_clauses)}
-          AND (1 - (c.embedding_vec <=> :query_vec)) >= :min_sim
+          AND (1 - (c.embedding_vec <-> (:query_vec)::vector)) >= :min_sim
         ORDER BY similarity DESC
-        LIMIT :limit
+        LIMIT :limit;
     """
 
-    rows = session.execute(text(sql), params).fetchall()
+    try:
+        rows = session.execute(text(sql), params).fetchall()
+    except Exception as e:
+        LOGGER.error(f"Error executing vector search query: {e}\n{traceback.format_exc()}")
+        rows = []
     
     results = []
     seen_ids = set()
@@ -248,9 +238,15 @@ def obtener_oportunidades_empresa(
     
     LOGGER.info(f"Matches encontrados para NIT {nit_empresa}: {len(matches)}")
 
+    # If no matches and fallback enabled, attempt LLM fallback
+    if not matches and USE_LLM_FALLBACK:
+        try:
+            matches = _fallback_llm_match(nit_empresa, top_k)
+            LOGGER.info("LLM fallback provided %d matches", len(matches))
+        except Exception as e:
+            LOGGER.error(f"LLM fallback failed: {e}\n{traceback.format_exc()}")
     if not matches:
         return []
-
     # Recortar al top_k solicitado
     matches = matches[:top_k]
 
@@ -273,3 +269,16 @@ def obtener_oportunidades_empresa(
             LOGGER.error(f"Error en clustering: {e}")
 
     return matches
+
+# ---------------------------------------------------------------------------
+# Optional LLM fallback implementation (placeholder)
+# ---------------------------------------------------------------------------
+
+def _fallback_llm_match(nit: str, top_k: int) -> List[MatchResult]:
+    """Generate synthetic matches using an LLM when the DB returns none.
+    This is a minimal stub; in a real implementation you would call the
+    Gemini or OpenAI API to embed the company name and retrieve similar
+    opportunities from an external source or a pre‑computed index.
+    """
+    # Placeholder implementation: return empty list
+    return []

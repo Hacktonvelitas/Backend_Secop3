@@ -35,3 +35,5 @@ pycryptodome
 
 
 boto3
+email-validator
+bcrypt==3.2.2

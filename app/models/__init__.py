@@ -5,7 +5,7 @@ from app.models.licitacion import (
     LicitacionDocumentos, PublicLicitacionChunk
 )
 from app.models.empresa import (
-    Empresa, EmpresaDocumentos, Companies
+    EmpresaInfo, EmpresaDocumentos, Companies
 )
 from app.models.user import Usuario
 from app.models.match import MatchRun, MatchResult

@@ -10,7 +10,7 @@ from datetime import date
 from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
-from app.operaciones.match_inicial import obtener_oportunidades_empresa, MatchResult
+from app.services.operaciones.match_inicial import obtener_oportunidades_empresa, MatchResult
 
 # Si tienes un servicio de OpenAI configurado:
 # from app.servicios.llm_service import analizar_match_con_gpt  (Ejemplo hipotético)
