@@ -8,12 +8,12 @@ from dataclasses import asdict
 from sqlalchemy.orm import Session
 
 from app.db.deps import get_db
-from app.services.match_service import MatchService
-from app.services.price_service import PriceService
+# Import logic
+# Note: Using try/except block in those files for imports, here we assume app package structure work or we fix appropriately
+from app.operaciones.match_inicial import obtener_oportunidades_empresa
+from app.operaciones.match_augmented import obtener_match_augmented
 
-# Existing AI imports
-from app.IA.query_data import process_query
-from app.IA.red_contac import process_query_graph
+
 
 router = APIRouter(
     prefix="/opportunities",
@@ -39,14 +39,10 @@ class MatchRequest(BaseModel):
     min_cuantia: Optional[float] = None
     max_cuantia: Optional[float] = None
 
-class AIQueryRequest(BaseModel):
-    prompt: str
-    session_id: Optional[str] = None
-    debug: Optional[bool] = False
-
-class GraphQuery(BaseModel):
-    query_text: str
-    debug: bool = False
+class AnalysisRequest(BaseModel):
+    nit_empresa: str
+    top_k: int = 100
+    sector_keywords: Optional[List[str]] = None
 
 # ----------------------------------------------------
 # MATCH ROUTES
@@ -129,16 +125,5 @@ def analisis_precios_endpoint(
 
 
 # ----------------------------------------------------
-# AI ROUTES (Keep legacy paths compatible)
+# AI ROUTES REMOVED (User request)
 # ----------------------------------------------------
-
-@router.post("/ai/query")
-def ai_query_old_path(payload: AIQueryRequest):
-    # Mapping old path to new structure if needed, or just keeping it
-    if not payload.prompt:
-        raise HTTPException(status_code=400, detail="Prompt required")
-    return process_query(payload.prompt, session_id=payload.session_id, debug=payload.debug)
-
-@router.post("/ai/graphs/assistant")
-def graphs_assistant_old_path(body: GraphQuery):
-    return process_query_graph(body.query_text, debug=body.debug)
