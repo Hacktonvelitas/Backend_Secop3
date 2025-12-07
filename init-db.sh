@@ -12,6 +12,9 @@ done
 echo "[init] Habilitando extensión vector..."
 psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
+# Optimizar sesión para restauración rápida
+export PGOPTIONS="-c synchronous_commit=off -c maintenance_work_mem=1GB"
+
 # ----------------------------------------------------------------
 # RESTAURACIÓN 1: BASE DE DATOS PRINCIPAL
 # ----------------------------------------------------------------

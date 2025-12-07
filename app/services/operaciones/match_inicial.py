@@ -9,25 +9,6 @@ from datetime import date
 from dataclasses import dataclass, asdict
 
 from sqlalchemy import text
-from sqlalchemy.orm import Session
-from sklearn.cluster import KMeans
-
-# -----------------
-# IMPORT FIX
-# -----------------
-try:
-    from app.db.schema import PublicLicitacion
-except ModuleNotFoundError:
-    # Fallback if running relative
-    try:
-        from db.schema import PublicLicitacion
-    except ModuleNotFoundError:
-        pass 
-
-# ============================================================
-# LOGGING
-# ============================================================
-LOGGER = logging.getLogger("match_empresa")
 if not LOGGER.handlers:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(logging.Formatter("[match_empresa] %(levelname)s %(message)s"))
