@@ -26,9 +26,38 @@ class AuthService:
             raise ValueError("Email already registered")
         
         if user_in.empresa_nit:
-            if not self.empresa_repo.get_by_nit(user_in.empresa_nit):
-                raise ValueError(f"Empresa with NIT {user_in.empresa_nit} does not exist")
-        
+            # Validate against companies table
+            company = self.empresa_repo.get_vector_data(user_in.empresa_nit)
+            if not company:
+                raise ValueError(f"Empresa with NIT {user_in.empresa_nit} does not exist in companies registry")
+            
+            # Generate embeddings for company fields if they exist and are missing embeddings
+            # We do this here to ensure the company is "ready" for matching
+            from app.services.embedding_service import EmbeddingService
+            embedding_service = EmbeddingService()
+            
+            updates = {}
+            
+            # Helper to update embedding if field exists and embedding is missing
+            def update_if_needed(field_val, current_embedding, field_name):
+                if field_val and not current_embedding:
+                    emb = embedding_service.generate_embedding(field_val)
+                    if emb:
+                        updates[field_name] = emb
+
+            update_if_needed(company.razon_social, company.razon_social_embedding, "razon_social_embedding")
+            update_if_needed(company.ciiu1, company.ciiu1_embedding, "ciiu1_embedding")
+            update_if_needed(company.ciiu2, company.ciiu2_embedding, "ciiu2_embedding")
+            update_if_needed(company.ciiu3, company.ciiu3_embedding, "ciiu3_embedding")
+            update_if_needed(company.ciiu4, company.ciiu4_embedding, "ciiu4_embedding")
+            
+            if updates:
+                # We need a method in repo to update company directly, or use session here
+                for k, v in updates.items():
+                    setattr(company, k, v)
+                self.session.add(company)
+                self.session.flush()
+
         user = self.user_repo.create(user_in)
         self.session.commit()
         return user

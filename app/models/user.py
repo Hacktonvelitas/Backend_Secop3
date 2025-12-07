@@ -16,9 +16,9 @@ class Usuario(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True)
     nombre_completo: Mapped[Optional[str]] = mapped_column(String(255))
     password_hash: Mapped[str] = mapped_column(Text)
-    # FK references empresa_info
-    empresa_nit: Mapped[Optional[str]] = mapped_column(ForeignKey("public.empresa_info.nit"))
+    # FK references companies (using nit as link, assuming uniqueness logic handled in service)
+    empresa_nit: Mapped[Optional[str]] = mapped_column(ForeignKey("public.companies.nit"))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()")
 
-    empresa: Mapped["EmpresaInfo"] = relationship(back_populates="usuarios")
+    empresa: Mapped["Companies"] = relationship(foreign_keys=[empresa_nit], primaryjoin="Usuario.empresa_nit == Companies.nit")
