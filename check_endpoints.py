@@ -1,46 +1,41 @@
 import requests
-import json
-
 import os
-# Defaults for running INSIDE the container
-BASE_URL = os.getenv("BASE_URL", "http://localhost:8000/api/v1")
+import sys
 
-def test_endpoint(name, url, payload):
+# Configuration
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8000/api/v1/opportunities")
+NIT = "9004300063"  # VERAGRO SAS
+
+def test_endpoint(name, url):
     print(f"\n--- Testing {name} ---")
+    print(f"URL: {url}")
     try:
-        resp = requests.post(url, json=payload)
-        print(f"Status: {resp.status_code}")
-        if resp.status_code == 200:
-            data = resp.json()
+        response = requests.get(url)
+        print(f"Status: {response.status_code}")
+        
+        if response.status_code == 200:
+            data = response.json()
             if isinstance(data, list):
                 print(f"Result count: {len(data)}")
+                print(f"Response snippet: {str(data)[:200]}...")
             else:
                 print("Result is a dictionary/object")
-            # Print first item or snippet
-            print(f"Response snippet: {str(data)[:200]}...")
+                print(f"Response snippet: {str(data)[:200]}...")
         else:
-            print(f"Error: {resp.text}")
+            print(f"Error: {response.text}")
+            
     except Exception as e:
-        print(f"Exception: {e}")
-
-def main():
-    # Payload for match/inicial and match/augmented
-    match_payload = {
-        "nit_empresa": "9004300063", 
-        "top_k": 3,
-        "min_score": 0.1 # Low score to try and get DB matches if possible
-    }
-
-    # Payload for analisis/precios
-    analysis_payload = {
-        "nit_empresa": "9004300063",
-        "top_k": 5,
-        "sector_keywords": ["Agro", "Cultivos"] # Guessed keywords for VERAGRO
-    }
-
-    test_endpoint("Match Inicial", f"{BASE_URL}/opportunities/match/inicial", match_payload)
-    test_endpoint("Match Augmented", f"{BASE_URL}/opportunities/match/augmented", match_payload)
-    test_endpoint("Analisis Precios", f"{BASE_URL}/opportunities/analisis/precios", analysis_payload)
+        print(f"Request failed: {e}")
 
 if __name__ == "__main__":
-    main()
+    # 0. Company Info
+    test_endpoint("Company Info", f"{BASE_URL}/{NIT}/company")
+
+    # 1. Match Inicial
+    test_endpoint("Match Inicial", f"{BASE_URL}/{NIT}/match?top_k=3")
+
+    # 2. Match Augmented
+    test_endpoint("Match Augmented", f"{BASE_URL}/{NIT}/match-ai?top_k=3")
+
+    # 3. Market Analysis
+    test_endpoint("Analisis Precios", f"{BASE_URL}/{NIT}/market-analysis?top_k_analysis=50")

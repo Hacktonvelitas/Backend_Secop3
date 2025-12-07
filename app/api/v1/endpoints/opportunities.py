@@ -1,114 +1,99 @@
 from typing import List, Optional
 from datetime import date
 from dataclasses import asdict
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, Query, Path
 from sqlalchemy.orm import Session
-from app.api.deps import get_db
 
-# Import Legacy Operations
+from app.api.deps import get_db
+# Importamos los servicios existentes
 from app.services.operaciones.match_inicial import obtener_oportunidades_empresa
+# IMPORTANTE: Importamos los nuevos servicios
 from app.services.operaciones.match_augmented import obtener_match_augmented
 from app.services.operaciones.precios_IQ import analizar_precios_empresa
 
 router = APIRouter()
 
-# --- Request Schemas ---
-
-class MatchRequest(BaseModel):
-    nit_empresa: str
-    fecha_inicio: Optional[date] = None
-    top_k: int = 10
-    min_score: float = 0.5
-    
-    # Niche Filters
-    sector_keywords: Optional[List[str]] = None
-    exclusion_keywords: Optional[List[str]] = None
-    location_filter: Optional[str] = None
-    
-    # Cuantia Range (min, max)
-    min_cuantia: Optional[float] = None
-    max_cuantia: Optional[float] = None
-
-class AnalysisRequest(BaseModel):
-    nit_empresa: str
-    top_k: int = 100
-    sector_keywords: Optional[List[str]] = None
-
-# --- Endpoints ---
-
-@router.post("/match/inicial")
-def match_inicial_endpoint(
-    body: MatchRequest,
+# --- 1. MATCH BÁSICO (Ya lo tenías) ---
+@router.get("/{nit}/match")
+def match_by_nit(
+    nit: str = Path(..., description="NIT de la empresa"),
+    top_k: int = Query(10, ge=1, le=100),
+    min_score: float = Query(0.5, ge=0.0, le=1.0),
+    fecha_inicio: Optional[date] = Query(None),
+    sector_keywords: Optional[str] = Query(None),
+    exclusion_keywords: Optional[str] = Query(None),
+    location_filter: Optional[str] = Query(None),
+    min_cuantia: Optional[float] = Query(None),
+    max_cuantia: Optional[float] = Query(None),
     db: Session = Depends(get_db)
 ):
-    """
-    Ejecuta el matching vectorial + filtros duros (Niche Filter).
-    """
-    # Prepare range tuple if both exist
-    rango_cuantia = None
-    if body.min_cuantia is not None and body.max_cuantia is not None:
-        rango_cuantia = (body.min_cuantia, body.max_cuantia)
-
-    results = obtener_oportunidades_empresa(
-        session=db,
-        nit_empresa=body.nit_empresa,
-        fecha_inicio=body.fecha_inicio,
-        top_k=body.top_k,
-        min_score=body.min_score,
-        sector_filter=body.sector_keywords,
-        exclusion_filter=body.exclusion_keywords,
-        location_filter=body.location_filter,
-        rango_cuantia=rango_cuantia
-    )
+    sector_list = [k.strip() for k in sector_keywords.split(",")] if sector_keywords else None
+    exclusion_list = [k.strip() for k in exclusion_keywords.split(",")] if exclusion_keywords else None
+    rango_cuantia = (min_cuantia, max_cuantia) if min_cuantia and max_cuantia else None
     
-    # Convert dataclasses to dicts
+    results = obtener_oportunidades_empresa(
+        session=db, nit_empresa=nit, fecha_inicio=fecha_inicio, top_k=top_k,
+        min_score=min_score, sector_filter=sector_list, exclusion_filter=exclusion_list,
+        location_filter=location_filter, rango_cuantia=rango_cuantia
+    )
     return [r.to_dict() for r in results]
 
+# --- 2. INFO EMPRESA (Ya lo tenías) ---
+@router.get("/{nit}/company")
+def get_company_info(
+    nit: str = Path(..., description="NIT de la empresa"),
+    db: Session = Depends(get_db)
+):
+    from sqlalchemy import text
+    sql = text("""
+        SELECT nit, razon_social, muncomercial, ciiu1, 
+               CASE WHEN razon_social_embedding IS NOT NULL THEN true ELSE false END as has_embedding
+        FROM companies WHERE nit = :nit LIMIT 1
+    """)
+    row = db.execute(sql, {"nit": nit.strip()}).fetchone()
+    if not row: return {"error": "Empresa no encontrada", "nit": nit}
+    return {"nit": row.nit, "razon_social": row.razon_social, "municipio": row.muncomercial, "has_embedding": row.has_embedding}
 
-@router.post("/match/augmented")
-def match_augmented_endpoint(
-    body: MatchRequest,
+# --- 3. NUEVO: MATCH AUGMENTED (IA Scoring) ---
+@router.get("/{nit}/match-ai")
+def match_augmented_by_nit(
+    nit: str = Path(...),
+    top_k: int = Query(10),
+    min_score: float = Query(0.5),
+    sector_keywords: Optional[str] = Query(None),
     db: Session = Depends(get_db)
 ):
     """
-    Ejecuta el pipeline completo: 
-    Match Inicial (Vectorial) -> Filtros IA Copilot -> Scoring 50/50.
+    Match avanzado que usa un 'Mock LLM' para re-evaluar la relevancia.
     """
-    # Prepare range tuple
-    rango_cuantia = None
-    if body.min_cuantia is not None and body.max_cuantia is not None:
-        rango_cuantia = (body.min_cuantia, body.max_cuantia)
-
+    sector_list = [k.strip() for k in sector_keywords.split(",")] if sector_keywords else None
+    
     results = obtener_match_augmented(
         session=db,
-        nit_empresa=body.nit_empresa,
-        fecha_inicio=body.fecha_inicio,
-        top_k=body.top_k,
-        min_score_inicial=body.min_score,
-        sector_filter=body.sector_keywords,
-        exclusion_filter=body.exclusion_keywords,
-        location_filter=body.location_filter,
-        rango_cuantia=rango_cuantia
+        nit_empresa=nit,
+        top_k=top_k,
+        min_score_inicial=min_score,
+        sector_filter=sector_list
     )
-    
-    # Convert dataclasses to dicts
-    # Convert dataclasses to dicts
-    return [r.to_dict() for r in results]
+    return [asdict(r) for r in results] # Dataclass a dict
 
-
-@router.post("/analisis/precios")
-def analisis_precios_endpoint(
-    body: AnalysisRequest,
+# --- 4. NUEVO: PRECIOS IQ (Análisis de Mercado) ---
+@router.get("/{nit}/market-analysis")
+def market_analysis(
+    nit: str = Path(...),
+    top_k_analysis: int = Query(50, description="Cuantas licitaciones usar para el análisis"),
+    sector_keywords: Optional[str] = Query(None),
     db: Session = Depends(get_db)
 ):
     """
-    Analiza rangos de precios basados en oportunidades similares.
+    Analiza estadísticas de precios (min, max, promedio) de licitaciones similares.
     """
+    sector_list = [k.strip() for k in sector_keywords.split(",")] if sector_keywords else None
+    
     result = analizar_precios_empresa(
         session=db,
-        nit_empresa=body.nit_empresa,
-        top_k_analysis=body.top_k,
-        sector_keywords=body.sector_keywords
+        nit_empresa=nit,
+        top_k_analysis=top_k_analysis,
+        sector_keywords=sector_list
     )
-    return asdict(result)
+    return result.to_dict()
